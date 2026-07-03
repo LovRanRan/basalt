@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | Phase 1 — single-node LSM storage engine |
-| Next commit | P1.4 — `feat(sstable): block-based writer with index block, bloom filter, and checksummed footer` |
-| Commits done | 3 / 39 (P1: 3/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
+| Next commit | P1.5 — `feat(sstable): reader with bloom-guarded point gets and seekable block iterators` |
+| Commits done | 4 / 39 (P1: 4/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
 | Blockers | none |
 | Last updated | 2026-07-03 |
 
@@ -25,7 +25,7 @@ No work happens outside the roadmap without amending it here first.
 
 ## Roadmap
 
-### Phase 1 — single-node LSM storage engine (3/11)
+### Phase 1 — single-node LSM storage engine (4/11)
 
 Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`, crash-safe on every path, with benchmarks.
 
@@ -35,7 +35,7 @@ Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`,
   *Done when: 100k-op differential test vs a reference sorted map passes race-clean.*
 - [x] **P1.3** `feat(wal): segmented append-only log with crc32 records and torn-tail recovery` — fixed-size segments, length+crc32c framed write batches, configurable fsync policy, replay that truncates the torn tail, deletion of flushed segments.
   *Done when: torn-write injection at every tail byte offset recovers exactly the committed prefix.*
-- [ ] **P1.4** `feat(sstable): block-based writer with index block, bloom filter, and checksummed footer` — ~4KB data blocks with restart-point prefix compression, index block, ~10 bits/key bloom filter, versioned footer, crc32c per block, table properties for the manifest.
+- [x] **P1.4** `feat(sstable): block-based writer with index block, bloom filter, and checksummed footer` — ~4KB data blocks with restart-point prefix compression, index block, ~10 bits/key bloom filter, versioned footer, crc32c per block, table properties for the manifest.
   *Done when: golden byte-layout test passes; out-of-order input fails with a typed error.*
 - [ ] **P1.5** `feat(sstable): reader with bloom-guarded point gets and seekable block iterators` — footer/checksum validation, bloom → index binary search → block restart-point search, lazy block loading, typed `ErrCorruption`.
   *Done when: randomized roundtrip + corruption-detection suites pass on 100k-entry tables.*
@@ -45,7 +45,7 @@ Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`,
   *Done when: full crash matrix (after WAL append / after L0 write / after manifest edit) recovers acked writes exactly, race-clean.*
 - [ ] **P1.8** `feat(engine): merging iterator, scan, version pinning, and seqno read snapshots` — k-way min-heap merge across memtables + SSTables, newest-seqno visibility, tombstone suppression, `Scan(start, end)`; **plus refcounted Version pinning and seqno-based read snapshots** so live iterators survive concurrent flush/compaction file retirement. *(Amended per design review: pinning moved here from the compaction commit — its own mid-scan-flush tests need it.)*
   *Done when: differential get/scan model test passes across forced multi-table states, including mid-scan flushes.*
-- [ ] **P1.9** `feat(compaction): background leveled compaction with tombstone gc and atomic manifest commits` — level scoring (L0 by file count, L1+ by ~10x byte fanout), overlap-based input picking, shadowed-entry and bottom-level tombstone dropping, atomic file-swap manifest edit; reads proceed via the P1.8 pinned versions.
+- [ ] **P1.9** `feat(compaction): background leveled compaction with tombstone gc and atomic manifest commits` — level scoring (L0 by file count, L1+ by ~10x byte fanout), overlap-based input picking, shadowed-entry and bottom-level tombstone dropping, atomic file-swap manifest edit; reads proceed via the P1.8 pinned versions. *(P1.4 note: add `Writer.EstimatedSize()` — offset + pending data/index blocks — for output-file splitting; a counting io.Writer lags by the pending blocks.)*
   *Done when: 1M-op churn test holds level invariants + model equivalence, incl. crash-mid-compaction recovery.*
 - [ ] **P1.10** `feat(engine): atomic write batch and consistent checkpoint api` — atomic multi-op `WriteBatch`; `Checkpoint()` = flush + hard-link live SSTables under a pinned Version + checkpoint manifest; `OpenFromCheckpoint` with atomic data-dir swap; stable snapshot iterator over a checkpoint. *(Inserted per design review: Raft apply, Raft snapshots, and shard rebalance all depend on these hooks. P1.2 constraint: batch ops need consecutive per-op seqnos — base..base+n-1, visibility published after the last add — because the memtable enforces internal-key uniqueness by panic.)*
   *Done when: checkpoint taken under concurrent writes reopens to a consistent point-in-time state; batch is all-or-nothing across crashes.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-03** · **P1.4** `feat(sstable): block-based writer with index block, bloom filter, and checksummed footer` · Landed `internal/sstable` (writer half): prefix-compressed data blocks with restart points, whole-table bloom (LevelDB hash + double hashing, now format-pinned), index block at restart interval 1 (pure binary search) mapping each block's **last key** → uvarint handle, 48-byte fixed footer (u64 handles, version, crc over first 36 bytes, magic `0xba5a17557ab1e000`), crc32c trailer per block; Properties (count/smallest/largest/size) returned for the manifest; sticky-error writer rejects out-of-order/duplicate/short keys (`ErrOutOfOrder`). Review (format + reader-fit lenses at xhigh) confirmed every P1.5 seek path works against this format unchanged, and caught: **u32 truncation in bloom** (read side could panic on hostile filter → now reads as "maybe"; write side rejects ≥2³² filter bits), **restart-offset u32 overflow = silent corruption with a valid crc** (BlockSize capped 1 GiB + overflow poisons the writer), and **two golden holes** — no multi-restart block and no version-straddling block cut were pinned; golden regenerated (RestartInterval 2 + a third `user:0002` version) with structural assertions so future `-update` runs can't silently lose those shapes. Empty-block encoding (restart [0], count 1) documented as a P1.5 trap; `EstimatedSize()` noted for P1.9. Tests race-clean incl. I/O-failure stickiness, caller-buffer scribbling, exact-boundary `>=` cut; bloom fpr 10 bits/key < 2.5% observed.
 
 - **2026-07-03** · **P1.3 fixup** `fix(wal): check or explicitly discard file-close errors` · errcheck (CI lint) flagged unchecked `Close()` returns; syncDir/repairTornTail now propagate close errors, intentional discards made explicit. golangci-lint installed locally (brew) and added to the pre-commit loop so lint failures surface before push, not in CI.
 
