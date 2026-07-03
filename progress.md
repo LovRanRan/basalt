@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | Phase 1 — single-node LSM storage engine |
-| Next commit | P1.2 — `feat(memtable): skiplist memtable with ordered iteration and size accounting` |
-| Commits done | 1 / 39 (P1: 1/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
+| Next commit | P1.3 — `feat(wal): segmented append-only log with crc32 records and torn-tail recovery` |
+| Commits done | 2 / 39 (P1: 2/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
 | Blockers | none |
 | Last updated | 2026-07-03 |
 
@@ -25,13 +25,13 @@ No work happens outside the roadmap without amending it here first.
 
 ## Roadmap
 
-### Phase 1 — single-node LSM storage engine (1/11)
+### Phase 1 — single-node LSM storage engine (2/11)
 
 Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`, crash-safe on every path, with benchmarks.
 
 - [x] **P1.1** `chore(build): bootstrap go module, ci pipeline, and internal key codec` — package layout (`internal/base|wal|memtable|sstable`, engine root); GitHub Actions running vet, golangci-lint, `-race` tests; internal key = user key + seqno + kind, comparator (user key asc, seqno desc), varint codecs.
   *Done when: CI green and the comparator property test holds on 10k random keys.*
-- [ ] **P1.2** `feat(memtable): skiplist memtable with ordered iteration and size accounting` — insert-only skiplist keyed by internal key, tombstones as Delete entries, SeekGE/Next iterator, single-writer/multi-reader via atomic pointers, approximate size tracking.
+- [x] **P1.2** `feat(memtable): skiplist memtable with ordered iteration and size accounting` — insert-only skiplist keyed by internal key, tombstones as Delete entries, SeekGE/Next iterator, single-writer/multi-reader via atomic pointers, approximate size tracking.
   *Done when: 100k-op differential test vs a reference sorted map passes race-clean.*
 - [ ] **P1.3** `feat(wal): segmented append-only log with crc32 records and torn-tail recovery` — fixed-size segments, length+crc32c framed write batches, configurable fsync policy, replay that truncates the torn tail, deletion of flushed segments.
   *Done when: torn-write injection at every tail byte offset recovers exactly the committed prefix.*
@@ -47,7 +47,7 @@ Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`,
   *Done when: differential get/scan model test passes across forced multi-table states, including mid-scan flushes.*
 - [ ] **P1.9** `feat(compaction): background leveled compaction with tombstone gc and atomic manifest commits` — level scoring (L0 by file count, L1+ by ~10x byte fanout), overlap-based input picking, shadowed-entry and bottom-level tombstone dropping, atomic file-swap manifest edit; reads proceed via the P1.8 pinned versions.
   *Done when: 1M-op churn test holds level invariants + model equivalence, incl. crash-mid-compaction recovery.*
-- [ ] **P1.10** `feat(engine): atomic write batch and consistent checkpoint api` — atomic multi-op `WriteBatch`; `Checkpoint()` = flush + hard-link live SSTables under a pinned Version + checkpoint manifest; `OpenFromCheckpoint` with atomic data-dir swap; stable snapshot iterator over a checkpoint. *(Inserted per design review: Raft apply, Raft snapshots, and shard rebalance all depend on these hooks.)*
+- [ ] **P1.10** `feat(engine): atomic write batch and consistent checkpoint api` — atomic multi-op `WriteBatch`; `Checkpoint()` = flush + hard-link live SSTables under a pinned Version + checkpoint manifest; `OpenFromCheckpoint` with atomic data-dir swap; stable snapshot iterator over a checkpoint. *(Inserted per design review: Raft apply, Raft snapshots, and shard rebalance all depend on these hooks. P1.2 constraint: batch ops need consecutive per-op seqnos — base..base+n-1, visibility published after the last add — because the memtable enforces internal-key uniqueness by panic.)*
   *Done when: checkpoint taken under concurrent writes reopens to a consistent point-in-time state; batch is all-or-nothing across crashes.*
 - [ ] **P1.11** `bench(engine): workload harness reporting throughput and p50/p99 latency` — db_bench-style CLI (fillseq/fillrandom/readrandom/readwhilewriting/scan), HDR histograms, engine counters exposing write amplification; go benchmarks for hot paths; reference run in README.
   *Done when: all workloads complete in CI smoke mode emitting throughput and p50/p99.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-03** · **P1.2** `feat(memtable): skiplist memtable with ordered iteration and size accounting` · Landed `internal/memtable`: insert-only skiplist over encoded internal keys (maxHeight 12, branch 1/4), single-writer/multi-reader via `atomic.Pointer` links published bottom-up after node init; `Get(userKey, seq)` via `AppendSeekKey`; live (non-snapshot) SeekGE/Next iterator; values copied on Add, reads capacity-capped against append-through; approximate size accounting drives future flush. Adversarial review (3 lenses, memory-model lens at xhigh) upgraded the tests, which is where the value was: **concurrent test originally couldn't catch publication bugs** — ascending inserts only ever splice at the skiplist tail, so readers never traverse a half-published node; now inserts follow a random permutation and scans SeekGE random windows. Differential test now targets version boundaries deterministically (query at e.seq and e.seq−1) instead of relying on random collisions to exercise the max-kind seek contract. Visibility guarantee re-stated in happens-before terms (timing alone promises nothing); P1.10 note added — batches need consecutive per-op seqnos, memtable panics on duplicate internal keys. Tests race-clean: 100k-op differential vs reference model, 30k random-order inserts against 4 concurrent readers, monotonic size, boundary/panic contracts.
 
 - **2026-07-03** · **P1.1 fixup** `fix(ci): pin golangci-lint v2.12` · First real CI run on GitHub: test job green, lint job failed — golangci-lint v2.1.6 is built with Go 1.24 and refuses a `go 1.26` module ("Go language version used to build golangci-lint is lower than the targeted Go version"). Pinned v2.12 (May 2026, Go 1.26-compatible). Repo published: https://github.com/LovRanRan/basalt (public).
 
