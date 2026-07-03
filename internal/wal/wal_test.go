@@ -383,7 +383,7 @@ func TestWriterPoisonedAfterFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustAppend(t, w, []byte("ok"))
-	w.f.Close() // the device fails underneath the writer
+	_ = w.f.Close() // the device fails underneath the writer
 	if _, err := w.Append([]byte("fails")); err == nil {
 		t.Fatal("append on a failed file must error")
 	}

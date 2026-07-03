@@ -87,18 +87,23 @@ func repairTornTail(dir string, id uint64) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	buf, err := io.ReadAll(f)
-	if err != nil {
-		return err
-	}
-	clean, _ := ScanRecords(buf, nil)
-	if clean != len(buf) {
-		if err := f.Truncate(int64(clean)); err != nil {
+	err = func() error {
+		buf, err := io.ReadAll(f)
+		if err != nil {
 			return err
 		}
+		clean, _ := ScanRecords(buf, nil)
+		if clean != len(buf) {
+			if err := f.Truncate(int64(clean)); err != nil {
+				return err
+			}
+		}
+		return f.Sync()
+	}()
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
-	return f.Sync()
+	return err
 }
 
 func (w *Writer) openSegment() error {
@@ -192,11 +197,11 @@ func (w *Writer) Close() error {
 	}
 	w.closed = true
 	if w.err != nil {
-		w.f.Close()
+		_ = w.f.Close()
 		return w.err
 	}
 	if err := w.f.Sync(); err != nil {
-		w.f.Close()
+		_ = w.f.Close()
 		return w.fail(err)
 	}
 	return w.f.Close()
