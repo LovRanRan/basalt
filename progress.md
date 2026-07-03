@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | Phase 1 — single-node LSM storage engine |
-| Next commit | P1.3 — `feat(wal): segmented append-only log with crc32 records and torn-tail recovery` |
-| Commits done | 2 / 39 (P1: 2/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
+| Next commit | P1.4 — `feat(sstable): block-based writer with index block, bloom filter, and checksummed footer` |
+| Commits done | 3 / 39 (P1: 3/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
 | Blockers | none |
 | Last updated | 2026-07-03 |
 
@@ -25,7 +25,7 @@ No work happens outside the roadmap without amending it here first.
 
 ## Roadmap
 
-### Phase 1 — single-node LSM storage engine (2/11)
+### Phase 1 — single-node LSM storage engine (3/11)
 
 Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`, crash-safe on every path, with benchmarks.
 
@@ -33,7 +33,7 @@ Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`,
   *Done when: CI green and the comparator property test holds on 10k random keys.*
 - [x] **P1.2** `feat(memtable): skiplist memtable with ordered iteration and size accounting` — insert-only skiplist keyed by internal key, tombstones as Delete entries, SeekGE/Next iterator, single-writer/multi-reader via atomic pointers, approximate size tracking.
   *Done when: 100k-op differential test vs a reference sorted map passes race-clean.*
-- [ ] **P1.3** `feat(wal): segmented append-only log with crc32 records and torn-tail recovery` — fixed-size segments, length+crc32c framed write batches, configurable fsync policy, replay that truncates the torn tail, deletion of flushed segments.
+- [x] **P1.3** `feat(wal): segmented append-only log with crc32 records and torn-tail recovery` — fixed-size segments, length+crc32c framed write batches, configurable fsync policy, replay that truncates the torn tail, deletion of flushed segments.
   *Done when: torn-write injection at every tail byte offset recovers exactly the committed prefix.*
 - [ ] **P1.4** `feat(sstable): block-based writer with index block, bloom filter, and checksummed footer` — ~4KB data blocks with restart-point prefix compression, index block, ~10 bits/key bloom filter, versioned footer, crc32c per block, table properties for the manifest.
   *Done when: golden byte-layout test passes; out-of-order input fails with a typed error.*
@@ -79,7 +79,7 @@ Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated stat
   *Done when: ElectionSafety verified over 2000+ seeds; any failing seed reproduces exactly.*
 - [ ] **P3.4** `feat(raft): log replication with appendentries and commit index advancement` — nextIndex/matchIndex, consistency check, conflict-term fast backtracking, Figure 8 commit rule.
   *Done when: under 20% simulated loss + leader kills, every acked-committed entry is identical at the same index on all nodes.*
-- [ ] **P3.5** `feat(raft): durable hard state and log persistence with crash-safe recovery` — currentTerm/votedFor/log in crc32c-framed segments (reusing P1.3 machinery), fsync-before-send ordering, torn-tail truncation on restart.
+- [ ] **P3.5** `feat(raft): durable hard state and log persistence with crash-safe recovery` — currentTerm/votedFor/log reusing the P1.3 record *framing* (`AppendRecord`/`NextRecord`/`ScanRecords`) in its own segmented store: raft needs indexed entry lookup and truncate-suffix on conflicting entries, which the WAL Writer's append-only/torn-tail invariants deliberately do not support. Fsync-before-send ordering, torn-tail truncation on restart. *(Scope clarified by P1.3 review.)*
   *Done when: crash-restart at any fsync boundary rejoins with no double-vote, term regression, or committed-entry loss.*
 - [ ] **P3.6** `feat(raft): apply committed entries to the lsm engine state machine` — StateMachine interface over the engine using P1.10 WriteBatch; clientID+seq dedup for exactly-once applies; completion futures. **Durability contract: engine WAL is disabled under raft — the raft log + snapshots are the sole durability source; recovery re-applies from the snapshot index via deterministic idempotent Apply that also rebuilds the dedup table.** *(Amended per design review; replica convergence asserted as logical scan equivalence, not byte-identical files.)*
   *Done when: after a 10k-op workload with two forced leader changes + a crash between apply and snapshot, all replicas scan-identical and every acked write present exactly once.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-03** · **P1.3** `feat(wal): segmented append-only log with crc32 records and torn-tail recovery` · Landed `internal/wal`: record framing crc32c(len+payload)+len+payload (exported — manifest reuses it), segmented Writer (rotation fsyncs a segment before creating its successor), Replay, Batch encode/decode. Key invariant: **existence of segment N+1 proves N is durable and whole** — established at rotation *and* at open-time repair; hence a bad record in the newest segment is a silently-skipped torn tail, while damage in older segments (or a gap in segment ids) is loud `ErrCorrupt`. Self-caught bug pre-review: torn tails must be *physically truncated* at OpenWriter, or a second restart misreads them as corruption. Review (crash-consistency lens at xhigh) then found the real blocker: **writer had no sticky error state** — after a failed Append, a later successful one lands behind the partial frame and replay silently drops it; writer now poisons permanently on first I/O error (also kills fsyncgate retries). Also per review: repair fsyncs even clean segments (page cache ≠ durable), parent-dir dirent fsync, per-removal dir syncs + contiguity check, `Append` returns the record's segment id (rotation happens post-write; `SegmentID()` alone would mis-record wal-log-numbers in P1.7), `MaxRecordSize` (64 MiB) keeps whole-segment replay reads legitimate, DecodeBatch allocation capped, macOS F_FULLFSYNC documented. Exhaustive test now covers truncation + bit-flip at **every byte of the whole segment** (~600 cases), not just the tail; P3.5 roadmap scope corrected (raft reuses framing, not the Writer). Tests race-clean.
 
 - **2026-07-03** · **P1.2** `feat(memtable): skiplist memtable with ordered iteration and size accounting` · Landed `internal/memtable`: insert-only skiplist over encoded internal keys (maxHeight 12, branch 1/4), single-writer/multi-reader via `atomic.Pointer` links published bottom-up after node init; `Get(userKey, seq)` via `AppendSeekKey`; live (non-snapshot) SeekGE/Next iterator; values copied on Add, reads capacity-capped against append-through; approximate size accounting drives future flush. Adversarial review (3 lenses, memory-model lens at xhigh) upgraded the tests, which is where the value was: **concurrent test originally couldn't catch publication bugs** — ascending inserts only ever splice at the skiplist tail, so readers never traverse a half-published node; now inserts follow a random permutation and scans SeekGE random windows. Differential test now targets version boundaries deterministically (query at e.seq and e.seq−1) instead of relying on random collisions to exercise the max-kind seek contract. Visibility guarantee re-stated in happens-before terms (timing alone promises nothing); P1.10 note added — batches need consecutive per-op seqnos, memtable panics on duplicate internal keys. Tests race-clean: 100k-op differential vs reference model, 30k random-order inserts against 4 concurrent readers, monotonic size, boundary/panic contracts.
 
