@@ -99,7 +99,7 @@ func (c *smCluster) pump(ticks int) {
 				if err := r.st.SaveReady(rd); err != nil {
 					t.Fatal(err)
 				}
-				if err := r.sm.Apply(rd.CommittedEntries); err != nil {
+				if _, err := r.sm.Apply(rd.CommittedEntries); err != nil {
 					t.Fatal(err)
 				}
 				for _, rs := range rd.ReadStates {
@@ -418,7 +418,7 @@ func TestReservedRangeIsInvisibleAndProtected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sm.Apply([]raft.Entry{{Index: 1, Term: 1, Data: nil}}); err != nil {
+	if _, err := sm.Apply([]raft.Entry{{Index: 1, Term: 1, Data: nil}}); err != nil {
 		t.Fatal(err)
 	}
 	keys, _ := collectScan(t, db.Scan(nil, nil))

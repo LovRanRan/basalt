@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | Phase 3 — hand-written Raft replication |
-| Next commit | P3.10 — `feat(server): grpc transport and client request routing with leader redirects` |
-| Commits done | 25 / 39 (P1: 11/11 · P2: 5/5 · P3: 9/11 · P4: 0/12) |
+| Next commit | P3.11 — `test(raft): leader-kill smoke test and replication benchmarks` |
+| Commits done | 26 / 39 (P1: 11/11 · P2: 5/5 · P3: 10/11 · P4: 0/12) |
 | Blockers | none (P1.9/P1.10 make-up review complete — 2 blockers found and fixed) |
 | Last updated | 2026-07-04 |
 
@@ -67,7 +67,7 @@ Goal: Basalt as a real service — gRPC API, CLI client, observability, Docker +
 - [x] **P2.5** `build(release): dockerfile and end-to-end smoke test wired into ci` — multi-stage distroless image; e2e test drives the real CLI against a real server including kill + restart WAL recovery.
   *Done when: CI builds the image and the e2e job passes, incl. data surviving server kill/restart.*
 
-### Phase 3 — hand-written Raft replication (9/11)
+### Phase 3 — hand-written Raft replication (10/11)
 
 Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated state machine, linearizable reads, survives leader kills.
 
@@ -89,7 +89,7 @@ Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated stat
   *Done when: a follower behind the compacted log converges to scan-identical state via chunked InstallSnapshot.*
 - [x] **P3.9** `feat(raft): linearizable reads via readindex with optional leader lease` — ReadIndex quorum confirmation, follower forward/redirect, opt-in leader lease fast path with documented clock-drift tradeoff.
   *Done when: porcupine checker finds zero linearizability violations across seeded partition/failover histories.*
-- [ ] **P3.10** `feat(server): grpc transport and client request routing with leader redirects` — real gRPC peer transport; NotLeader errors carry leader hints; client caches leader and retries idempotently (safe via P3.6 dedup).
+- [x] **P3.10** `feat(server): grpc transport and client request routing with leader redirects` — real gRPC peer transport; NotLeader errors carry leader hints; client caches leader and retries idempotently (safe via P3.6 dedup).
   *Done when: a client given any node address completes reads/writes on a live 3-node cluster across a leader change.*
 - [ ] **P3.11** `test(raft): leader-kill smoke test and replication benchmarks` — black-box process-level leader-kill smoke test plus replicated write throughput/latency benchmarks with baseline numbers recorded. *(Trimmed per design review — the full chaos harness lives in Phase 4.)*
   *Done when: smoke test survives repeated leader kills with zero acked-write loss; `make bench-raft` emits baselines.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P3.10** `feat(server): grpc transport and client request routing with leader redirects` · New `cluster` package ties raft + engine + gRPC into a running member: a single event-loop goroutine owns the (non-thread-safe) `raft.Node`, driven by ticks, an incoming-message channel (fed by the `RaftService` gRPC server), proposals, and reads; `drainReady` persists → applies (signaling proposal waiters by the (clientID,seq) the state machine now returns, and read waiters by ReadState id) → sends messages to peers → advances → maybe-snapshots. Writes propose through raft and block until applied; reads go through ReadIndex then read the local engine; a request to a non-leader returns `not-leader:<id>` and the `Client` caches the leader, follows the hint (or round-robins), and retries. proto gained `RaftService.Step` + message types. Documented limitation: proposals use the node id as the client namespace, so a redirect-retry of an already-applied write can double-apply — idempotent for set/delete, but strict exactly-once needs client-supplied request ids (a follow-up once the proto carries them). MsgSnap over the RPC path is stubbed (out-of-band transfer not wired) — a far-behind follower waits; fine for P3.11's kill test. Tests race-clean: real 3-node TCP cluster, 200 writes + 200 linearizable reads through redirects; a client forced at a follower redirects and updates its cache.
 
 - **2026-07-04** · **P3.9** `feat(raft): linearizable reads via readindex with optional leader lease` · `Node.ReadIndex(id)`: records the commit index, confirms leadership via a fresh quorum of AppendEntries acks, and surfaces the read through `Ready.ReadStates` once that index is applied — so a served read reflects every write committed before it was issued, and a deposed leader (no quorum) can never serve one. Two subtle points got the design right: (1) a read may only be served once the leader has committed a **current-term** entry (its no-op) — else its commit index could be stale; (2) reads recorded after a confirmation round starts must wait for the NEXT round, since the in-flight round's heartbeats only prove leadership as of when they were sent. Confirmation rides on AppendEntries acks (not a separate message), so a lost round retries on the next heartbeat — the first cut used a one-shot MsgRead that hung forever when dropped. Opt-in `LeaseRead` serves within the election-timeout window off the last quorum heartbeat, skipping the round (documented as correct only under bounded clock drift). Tests race-clean: linearizable read reflects prior writes across 200 writes; partitioned leader cannot serve a read; lease read serves promptly; raft-unit quorum-required and current-term-required checks.
 

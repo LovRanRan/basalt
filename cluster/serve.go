@@ -1,0 +1,39 @@
+package cluster
+
+import (
+	"net"
+
+	"google.golang.org/grpc"
+
+	basaltv1 "github.com/LovRanRan/basalt/api/basalt/v1"
+)
+
+// Servers holds the two gRPC servers a member runs: the peer transport
+// (RaftService) and the client API (KVService).
+type Servers struct {
+	Raft *grpc.Server
+	KV   *grpc.Server
+}
+
+// Serve registers and starts the member's gRPC services on the given
+// listeners. It returns immediately; Stop the returned servers to shut
+// down. raftLis carries consensus traffic between nodes; kvLis serves
+// clients.
+//
+// Exactly-once note: writes proposed through a node are stamped with that
+// node's id as the client namespace, so a client that redirects to a new
+// leader and retries a write it had already succeeded (but whose response
+// was lost) can apply it twice. For set/delete this is idempotent; strict
+// end-to-end exactly-once needs client-supplied request ids, a follow-up
+// once the proto carries them.
+func (n *Node) Serve(raftLis, kvLis net.Listener) *Servers {
+	rs := grpc.NewServer()
+	basaltv1.RegisterRaftServiceServer(rs, &raftServer{n: n})
+	go func() { _ = rs.Serve(raftLis) }()
+
+	ks := grpc.NewServer()
+	basaltv1.RegisterKVServiceServer(ks, newKVServer(n))
+	go func() { _ = ks.Serve(kvLis) }()
+
+	return &Servers{Raft: rs, KV: ks}
+}

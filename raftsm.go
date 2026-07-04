@@ -131,24 +131,37 @@ func ReadSnapshotMeta(dir string) (index, term uint64, err error) {
 // P3.7).
 func (sm *StateMachine) AppliedTerm() uint64 { return sm.term }
 
+// Applied reports one command that Apply committed, so the node can signal
+// its proposer.
+type Applied struct {
+	ClientID uint64
+	Seq      uint64
+	Index    uint64
+}
+
 // Apply folds committed entries into the engine, in order. Each entry
 // becomes one atomic engine batch: the user ops (unless the command is a
 // duplicate — same client, non-increasing seq — in which case they are
 // skipped), the session update, and the applied-index record. Duplicate or
-// empty entries still advance the applied index durably.
-func (sm *StateMachine) Apply(entries []raft.Entry) error {
+// empty entries still advance the applied index durably. It returns the
+// (clientID, seq) of every command entry applied, in order.
+func (sm *StateMachine) Apply(entries []raft.Entry) ([]Applied, error) {
+	var out []Applied
 	for _, e := range entries {
 		if e.Index != sm.applied+1 {
-			return fmt.Errorf("basalt: apply gap: entry %d after applied %d", e.Index, sm.applied)
+			return nil, fmt.Errorf("basalt: apply gap: entry %d after applied %d", e.Index, sm.applied)
 		}
 		var eb wal.Batch
 		var sessClient, sessSeq uint64
+		var cmdClient, cmdSeq uint64
+		haveCmd := false
 		haveSess := false
 		if e.Data != nil {
 			cmd, err := DecodeCommand(e.Data)
 			if err != nil {
-				return fmt.Errorf("basalt: entry %d: %w", e.Index, err)
+				return nil, fmt.Errorf("basalt: entry %d: %w", e.Index, err)
 			}
+			cmdClient, cmdSeq, haveCmd = cmd.ClientID, cmd.Seq, true
 			if cmd.Seq > sm.sessions[cmd.ClientID] {
 				eb.Ops = append(eb.Ops, cmd.Batch.inner.Ops...)
 				sk := append(append([]byte(nil), sessionPrefix...), make([]byte, 8)...)
@@ -161,13 +174,16 @@ func (sm *StateMachine) Apply(entries []raft.Entry) error {
 		av = binary.LittleEndian.AppendUint64(av, e.Term)
 		eb.Put(appliedKey, av)
 		if err := sm.db.applyRaft(&eb); err != nil {
-			return err
+			return nil, err
 		}
 		if haveSess {
 			sm.sessions[sessClient] = sessSeq
 		}
+		if haveCmd {
+			out = append(out, Applied{ClientID: cmdClient, Seq: cmdSeq, Index: e.Index})
+		}
 		sm.applied = e.Index
 		sm.term = e.Term
 	}
-	return nil
+	return out, nil
 }

@@ -14,6 +14,37 @@ service KVService {
   rpc Scan(ScanRequest) returns (stream ScanResponse);
 }
 
+// RaftService carries consensus messages between cluster nodes. Step
+// delivers one raft message; the transport is unary and idempotent-safe
+// (raft tolerates dropped, duplicated, and reordered messages).
+service RaftService {
+  rpc Step(StepRequest) returns (StepResponse);
+}
+
+message StepRequest {
+  RaftMessage message = 1;
+}
+
+message RaftMessage {
+  uint64 type = 1;
+  uint64 from = 2;
+  uint64 to = 3;
+  uint64 term = 4;
+  uint64 log_index = 5;
+  uint64 log_term = 6;
+  uint64 commit = 7;
+  bool reject = 8;
+  repeated RaftEntry entries = 9;
+}
+
+message RaftEntry {
+  uint64 index = 1;
+  uint64 term = 2;
+  bytes data = 3;
+}
+
+message StepResponse {}
+
 message GetRequest {
   bytes key = 1;
 }

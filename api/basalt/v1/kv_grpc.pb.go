@@ -245,3 +245,113 @@ var KVService_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "basalt/v1/kv.proto",
 }
+
+const (
+	RaftService_Step_FullMethodName = "/basalt.v1.RaftService/Step"
+)
+
+// RaftServiceClient is the client API for RaftService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// RaftService carries consensus messages between cluster nodes. Step
+// delivers one raft message; the transport is unary and idempotent-safe
+// (raft tolerates dropped, duplicated, and reordered messages).
+type RaftServiceClient interface {
+	Step(ctx context.Context, in *StepRequest, opts ...grpc.CallOption) (*StepResponse, error)
+}
+
+type raftServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewRaftServiceClient(cc grpc.ClientConnInterface) RaftServiceClient {
+	return &raftServiceClient{cc}
+}
+
+func (c *raftServiceClient) Step(ctx context.Context, in *StepRequest, opts ...grpc.CallOption) (*StepResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StepResponse)
+	err := c.cc.Invoke(ctx, RaftService_Step_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RaftServiceServer is the server API for RaftService service.
+// All implementations must embed UnimplementedRaftServiceServer
+// for forward compatibility.
+//
+// RaftService carries consensus messages between cluster nodes. Step
+// delivers one raft message; the transport is unary and idempotent-safe
+// (raft tolerates dropped, duplicated, and reordered messages).
+type RaftServiceServer interface {
+	Step(context.Context, *StepRequest) (*StepResponse, error)
+	mustEmbedUnimplementedRaftServiceServer()
+}
+
+// UnimplementedRaftServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedRaftServiceServer struct{}
+
+func (UnimplementedRaftServiceServer) Step(context.Context, *StepRequest) (*StepResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Step not implemented")
+}
+func (UnimplementedRaftServiceServer) mustEmbedUnimplementedRaftServiceServer() {}
+func (UnimplementedRaftServiceServer) testEmbeddedByValue()                     {}
+
+// UnsafeRaftServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to RaftServiceServer will
+// result in compilation errors.
+type UnsafeRaftServiceServer interface {
+	mustEmbedUnimplementedRaftServiceServer()
+}
+
+func RegisterRaftServiceServer(s grpc.ServiceRegistrar, srv RaftServiceServer) {
+	// If the following call panics, it indicates UnimplementedRaftServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&RaftService_ServiceDesc, srv)
+}
+
+func _RaftService_Step_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StepRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RaftServiceServer).Step(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RaftService_Step_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RaftServiceServer).Step(ctx, req.(*StepRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// RaftService_ServiceDesc is the grpc.ServiceDesc for RaftService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var RaftService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "basalt.v1.RaftService",
+	HandlerType: (*RaftServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Step",
+			Handler:    _RaftService_Step_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "basalt/v1/kv.proto",
+}
