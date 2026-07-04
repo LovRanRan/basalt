@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package basalt.v1;
+
+option go_package = "github.com/LovRanRan/basalt/api/basalt/v1;basaltv1";
+
+// KVService is the client-facing surface of a Basalt node. Get carries explicit
+// found semantics — an absent key is not an error. Scan streams batches of
+// pairs for the half-open range [start, end).
+service KVService {
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc Scan(ScanRequest) returns (stream ScanResponse);
+}
+
+message GetRequest {
+  bytes key = 1;
+}
+
+message GetResponse {
+  bool found = 1;
+  bytes value = 2;
+}
+
+message PutRequest {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+message PutResponse {}
+
+message DeleteRequest {
+  bytes key = 1;
+}
+
+message DeleteResponse {}
+
+message ScanRequest {
+  // start is inclusive; empty means the first key.
+  bytes start = 1;
+  // end is exclusive; empty means past the last key.
+  bytes end = 2;
+  // limit caps the total pairs returned; zero means unlimited.
+  uint64 limit = 3;
+}
+
+message ScanResponse {
+  repeated KeyValue pairs = 1;
+}
+
+message KeyValue {
+  bytes key = 1;
+  bytes value = 2;
+}

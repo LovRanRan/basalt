@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | **Phase 1 COMPLETE** → Phase 2 — networked single-node server |
-| Next commit | P2.1 — `feat(api): protobuf kv service definition with generated grpc stubs` |
-| Commits done | 11 / 39 (P1: 11/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
+| Next commit | P2.2 — `feat(server): grpc service implementation wrapping the lsm engine` |
+| Commits done | 12 / 39 (P1: 11/11 · P2: 1/5 · P3: 0/11 · P4: 0/12) |
 | Blockers | none (P1.9/P1.10 external reviews were skipped due to a session usage limit — a make-up review pass is worth running before Phase 3 builds on the engine) |
 | Last updated | 2026-07-04 |
 
@@ -52,11 +52,11 @@ Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`,
 - [x] **P1.11** `bench(engine): workload harness reporting throughput and p50/p99 latency` — db_bench-style CLI (fillseq/fillrandom/readrandom/readwhilewriting/scan), HDR histograms, engine counters exposing write amplification; go benchmarks for hot paths; reference run in README.
   *Done when: all workloads complete in CI smoke mode emitting throughput and p50/p99.*
 
-### Phase 2 — networked single-node server (0/5)
+### Phase 2 — networked single-node server (1/5)
 
 Goal: Basalt as a real service — gRPC API, CLI client, observability, Docker + CI. *(Design review cut a redundant standalone CI commit; its Makefile folds into P2.1.)*
 
-- [ ] **P2.1** `feat(api): protobuf kv service definition with generated grpc stubs` — `api/basalt/v1/kv.proto` (unary Get/Put/Delete, streaming Scan), buf lint + breaking-change + codegen-drift checks in CI, committed generated code, Makefile.
+- [x] **P2.1** `feat(api): protobuf kv service definition with generated grpc stubs` — `api/basalt/v1/kv.proto` (unary Get/Put/Delete, streaming Scan), buf lint + breaking-change + codegen-drift checks in CI, committed generated code, Makefile.
   *Done when: buf lint + drift check pass in CI and stubs compile in `go build ./...`.*
 - [ ] **P2.2** `feat(server): grpc service implementation wrapping the lsm engine` — engine errors → canonical gRPC codes; Scan streams fixed-size batches honoring limits and context cancellation.
   *Done when: full CRUD + streaming scan pass over bufconn with correct status codes, race-clean.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P2.1** `feat(api): protobuf kv service definition with generated grpc stubs` · Phase 2 opens: `api/basalt/v1/kv.proto` — unary Get/Put/Delete with explicit found semantics, server-streaming Scan over [start, end) with batched pairs and a limit. buf v2 for lint + generation (STANDARD lint made the service `KVService`); generated stubs committed so the module builds without protoc; Makefile unifies local/CI targets; new CI `proto` job runs buf lint + a codegen-drift check; first real deps land (grpc v1.82, protobuf v1.36) so go.sum exists and setup-go caching is ON for test/proto jobs.
 
 - **2026-07-04** · **P1.11** `bench(engine): workload harness reporting throughput and p50/p99 latency` · **Phase 1 complete.** `cmd/basalt-bench`: fillseq / fillrandom / readrandom / readwhilewriting / scan with latency percentiles and engine counters (`DB.Metrics()`: flushes, compactions, bytes — write amp visible: the reference run shows 260MB flushed + 618MB compacted for ~20MB of live data under heavy overwrite churn, ~3.4x compaction amplification). Reference numbers (M-series mac, no-sync): fillrandom 290k ops/s p99=5.5µs; readrandom 596k ops/s p99=81µs; scan 5.97M keys/s. Hot paths: skiplist insert 338ns, sstable get 1.03µs, merge next 13ns. CI now runs `basalt-bench -smoke` every push. README overhauled: Phase-1 status, usage example, benchmark section with the macOS F_FULLFSYNC caveat (from the P1.3 review).
 

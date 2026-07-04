@@ -13,12 +13,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: false
-      - run: go build ./...
-      - run: go vet ./...
+          cache: true
+      - run: make build
+      - run: make vet
       - run: test -z "$(gofmt -l .)"
-      - run: go test -race -count=1 ./...
-      - run: go run ./cmd/basalt-bench -smoke
+      - run: make test
+      - run: make bench-smoke
 
   lint:
     runs-on: ubuntu-latest
@@ -31,3 +31,19 @@ jobs:
       - uses: golangci/golangci-lint-action@v8
         with:
           version: v2.12
+
+  proto:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - run: go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+      - run: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+      - run: make proto-lint
+      - run: make proto-drift
