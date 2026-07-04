@@ -79,21 +79,39 @@ func (c *Client) call(ctx context.Context, fn func(cl basaltv1.KVServiceClient) 
 			c.leader = target
 			return nil
 		}
-		hint, isRedirect := leaderHint(err)
-		if !isRedirect {
-			return err
-		}
-		if hint != 0 && c.conns[hint] != nil {
-			target = hint
-		} else {
-			// No hint: try the next node.
+		if hint, isRedirect := leaderHint(err); isRedirect {
+			// Explicit not-leader: follow the hint, else round-robin.
+			if hint != 0 && c.conns[hint] != nil {
+				target = hint
+			} else {
+				target = c.ids[(indexOf(c.ids, target)+1)%len(c.ids)]
+			}
+		} else if isUnavailable(err) {
+			// The node is down or unreachable: try the next one.
 			target = c.ids[(indexOf(c.ids, target)+1)%len(c.ids)]
+		} else {
+			return err
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 	}
 	return errors.New("cluster: no leader found within hop budget")
+}
+
+// isUnavailable reports a transport-level failure (node down, connection
+// refused, deadline) that another node might not have.
+func isUnavailable(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch st.Code() {
+	case codes.Unavailable, codes.DeadlineExceeded, codes.Aborted:
+		return true
+	default:
+		return false
+	}
 }
 
 func indexOf(ids []uint64, v uint64) int {

@@ -17,7 +17,7 @@ type testCluster struct {
 	kv    map[uint64]string // id -> kv listen addr
 }
 
-func freePort(t *testing.T) (net.Listener, string) {
+func freePort(t testing.TB) (net.Listener, string) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

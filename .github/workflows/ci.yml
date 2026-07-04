@@ -42,6 +42,16 @@ jobs:
           cache: true
       - run: go test -tags e2e -count=1 -v ./e2e/
 
+  chaos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -tags chaos -run TestLeaderKillSmoke -count=1 -timeout 300s -p 1 ./cluster/
+
   docker:
     runs-on: ubuntu-latest
     steps:
