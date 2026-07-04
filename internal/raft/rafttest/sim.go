@@ -7,6 +7,7 @@ package rafttest
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 
 	"github.com/LovRanRan/basalt/internal/raft"
@@ -19,6 +20,7 @@ type Options struct {
 	DupRate      float64 // per-message duplication probability
 	MaxDelay     int     // extra ticks a message may sit in flight (0 = next tick)
 	ElectionTick int     // per-node election timeout base (default 10)
+	Dir          string  // when set, nodes persist here and support Restart
 }
 
 type inflight struct {
@@ -39,9 +41,12 @@ type Network struct {
 	seqCtr    uint64
 	partition map[uint64]bool // isolated node ids
 	appliedBy map[uint64][]raft.Entry
+	store     map[uint64]*raft.Storage
+	dir       string // when set, nodes persist here and can be restarted
 }
 
 // NewNetwork builds a cluster of ids wired through the simulated network.
+// If opts.Dir is set, each node persists to opts.Dir and can be Restarted.
 func NewNetwork(ids []uint64, opts Options) *Network {
 	if opts.ElectionTick <= 0 {
 		opts.ElectionTick = 10
@@ -53,16 +58,55 @@ func NewNetwork(ids []uint64, opts Options) *Network {
 		rng:       splitmix(opts.Seed),
 		partition: map[uint64]bool{},
 		appliedBy: map[uint64][]raft.Entry{},
+		store:     map[uint64]*raft.Storage{},
+		dir:       opts.Dir,
 	}
 	sort.Slice(net.ids, func(i, j int) bool { return net.ids[i] < net.ids[j] })
 	for _, id := range net.ids {
-		id := id
-		net.Nodes[id] = raft.NewNodeConfig(raft.Config{
-			ID: id, Peers: ids, ElectionTick: opts.ElectionTick,
-			Rand: func(hi int) int { return int(net.rng() % uint64(hi)) },
-		})
+		net.open(id)
 	}
 	return net
+}
+
+func (net *Network) cfg(id uint64) raft.Config {
+	return raft.Config{
+		ID: id, Peers: net.ids, ElectionTick: net.opts.ElectionTick,
+		Rand: func(hi int) int { return int(net.rng() % uint64(hi)) },
+	}
+}
+
+func (net *Network) open(id uint64) {
+	if net.dir == "" {
+		net.Nodes[id] = raft.NewNodeConfig(net.cfg(id))
+		return
+	}
+	st, hs, ents, err := raft.OpenStorage(filepath.Join(net.dir, fmt.Sprintf("node-%d", id)))
+	if err != nil {
+		panic(fmt.Sprintf("rafttest: open storage %d: %v", id, err))
+	}
+	net.store[id] = st
+	// appliedBy is the durable "state machine": its length is the applied
+	// index (entries are contiguous from index 1).
+	net.Nodes[id] = raft.RestoreNode(net.cfg(id), hs, ents, uint64(len(net.appliedBy[id])))
+}
+
+// Restart simulates a crash + reboot of one node: it drops the in-memory
+// node and reopens it from its persisted storage. Only valid when the
+// network was created with a Dir.
+func (net *Network) Restart(id uint64) {
+	if net.dir == "" {
+		panic("rafttest: Restart requires Options.Dir")
+	}
+	_ = net.store[id].Close()
+	// Drop in-flight messages TO the restarted node (a crash loses them).
+	var kept []inflight
+	for _, f := range net.queue {
+		if f.msg.To != id {
+			kept = append(kept, f)
+		}
+	}
+	net.queue = kept
+	net.open(id)
 }
 
 func (net *Network) prob(p float64) bool {
@@ -100,6 +144,13 @@ func (net *Network) pump() {
 			continue
 		}
 		rd := n.Ready()
+		// Persist before send — the fsync-before-send rule. On restart
+		// the node recovers exactly this persisted state.
+		if st := net.store[id]; st != nil {
+			if err := st.SaveReady(rd); err != nil {
+				panic(fmt.Sprintf("rafttest: persist %d: %v", id, err))
+			}
+		}
 		net.appliedBy[id] = append(net.appliedBy[id], rd.CommittedEntries...)
 		for _, m := range rd.Messages {
 			net.enqueue(m)

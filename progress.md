@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | Phase 3 — hand-written Raft replication |
-| Next commit | P3.5 — `feat(raft): durable hard state and log persistence with crash-safe recovery` |
-| Commits done | 20 / 39 (P1: 11/11 · P2: 5/5 · P3: 4/11 · P4: 0/12) |
+| Next commit | P3.6 — `feat(raft): apply committed entries to the lsm engine state machine` |
+| Commits done | 21 / 39 (P1: 11/11 · P2: 5/5 · P3: 5/11 · P4: 0/12) |
 | Blockers | none (P1.9/P1.10 make-up review complete — 2 blockers found and fixed) |
 | Last updated | 2026-07-04 |
 
@@ -67,7 +67,7 @@ Goal: Basalt as a real service — gRPC API, CLI client, observability, Docker +
 - [x] **P2.5** `build(release): dockerfile and end-to-end smoke test wired into ci` — multi-stage distroless image; e2e test drives the real CLI against a real server including kill + restart WAL recovery.
   *Done when: CI builds the image and the e2e job passes, incl. data surviving server kill/restart.*
 
-### Phase 3 — hand-written Raft replication (4/11)
+### Phase 3 — hand-written Raft replication (5/11)
 
 Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated state machine, linearizable reads, survives leader kills.
 
@@ -79,7 +79,7 @@ Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated stat
   *Done when: ElectionSafety verified over 2000+ seeds; any failing seed reproduces exactly.*
 - [x] **P3.4** `feat(raft): log replication with appendentries and commit index advancement` — nextIndex/matchIndex, consistency check, conflict-term fast backtracking, Figure 8 commit rule.
   *Done when: under 20% simulated loss + leader kills, every acked-committed entry is identical at the same index on all nodes.*
-- [ ] **P3.5** `feat(raft): durable hard state and log persistence with crash-safe recovery` — currentTerm/votedFor/log reusing the P1.3 record *framing* (`AppendRecord`/`NextRecord`/`ScanRecords`) in its own segmented store: raft needs indexed entry lookup and truncate-suffix on conflicting entries, which the WAL Writer's append-only/torn-tail invariants deliberately do not support. Fsync-before-send ordering, torn-tail truncation on restart. *(Scope clarified by P1.3 review.)*
+- [x] **P3.5** `feat(raft): durable hard state and log persistence with crash-safe recovery` — currentTerm/votedFor/log reusing the P1.3 record *framing* (`AppendRecord`/`NextRecord`/`ScanRecords`) in its own segmented store: raft needs indexed entry lookup and truncate-suffix on conflicting entries, which the WAL Writer's append-only/torn-tail invariants deliberately do not support. Fsync-before-send ordering, torn-tail truncation on restart. *(Scope clarified by P1.3 review.)*
   *Done when: crash-restart at any fsync boundary rejoins with no double-vote, term regression, or committed-entry loss.*
 - [ ] **P3.6** `feat(raft): apply committed entries to the lsm engine state machine` — StateMachine interface over the engine using P1.10 WriteBatch; clientID+seq dedup for exactly-once applies; completion futures. **Durability contract: engine WAL is disabled under raft — the raft log + snapshots are the sole durability source; recovery re-applies from the snapshot index.** *(Amended per design review; replica convergence asserted as logical scan equivalence.)* **Make-up-review prescriptions (start here): (1) keep seqnos engine-private — do NOT add ApplyAt(batch,seq); the StateMachine writes appliedIndex + entry term + clientID/seq dedup into the SAME Batch as user ops under a reserved key prefix (\x00!raft/, rejected from user Put), so recovery is EXACT prefix replay, not idempotent re-apply — sidesteps the memtable duplicate-key panic; relies on the now-documented P1.7 invariant that a seal never splits a batch. (2) Add Options.DisableWAL (not just DisableWALSync): Open still prunes+replays the wal dir but FAILS if any record survives, skips OpenWriter, seals must not rotate a nil wal.**
   *Done when: after a 10k-op workload with two forced leader changes + a crash between apply and snapshot, all replicas scan-identical and every acked write present exactly once.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P3.5** `feat(raft): durable hard state and log persistence with crash-safe recovery` · `internal/raft/storage.go`: reuses the P1.3 record *framing* (crc32c, torn-tail-tolerant) as the review prescribed, but a raft-specific record stream (HardState / entries / truncate events) because raft needs **suffix truncation** the append-only WAL Writer forbids. `SaveReady(rd)` persists entries → hardstate → fsync in the required order, satisfying fsync-before-send; `AppendEntries` auto-logs a truncation when a conflicting suffix overwrites. `RestoreNode(cfg, hs, ents, appliedIndex)` resumes as a follower at the persisted term, never re-voting/regressing. **Design bug caught before writing the crash test:** naively setting `applied=committed` on restore loses committed-but-not-yet-emitted entries (when stabled lagged commit at crash time) — fixed by taking the state machine's own durable appliedIndex and re-emitting `(applied, commit]` (exactly the hook P3.6 needs). Simulator gained persistence + `Restart(id)` (drop node, reopen from disk, discard in-flight messages to it). Tests: storage roundtrip/truncate/torn-tail, restored node refuses a second vote, **60-seed crash-restart chaos** (rotating restarts under loss+delay: no two leaders per term, no committed-entry loss, replicas agree at every applied index).
 
 - **2026-07-04** · **P3.4** `feat(raft): log replication with appendentries and commit index advancement` · Real AppendEntries replaces P3.2's leadership-only stub: per-follower nextIndex/matchIndex, the prevLogIndex/prevLogTerm consistency check, conflict-hint fast backup (reject points the leader at the first matchable index so it backs up by terms, not one index per round-trip), and commit advancement by the Figure-8 rule (only current-term entries commit a quorum; the leader's own match is its persisted prefix). Proposals and new commit indices replicate promptly (bcast on propose and on commit-advance), not just on the heartbeat tick. The P3.3 replication assertions now run for real. Tests: replicate-to-all, a partitioned follower catches up on heal, **300-seed log-matching under 10% loss + delay + repeated leader kills** (every pair of nodes agrees at every shared applied index — state-machine safety), fast-backup convergence on a divergent 20-entry log.
 

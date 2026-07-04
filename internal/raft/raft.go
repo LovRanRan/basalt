@@ -151,6 +151,23 @@ func NewNode(id uint64, peers []uint64) *Node {
 }
 
 func NewNodeConfig(cfg Config) *Node {
+	return newNode(cfg, HardState{}, nil, 0)
+}
+
+// RestoreNode rebuilds a node from persisted state: the recovered
+// HardState, log entries (index order from 1), and the state machine's own
+// durable applied index. It resumes as a follower at the persisted term —
+// never re-voting, never regressing — and re-emits committed-but-unapplied
+// entries so the state machine can catch up.
+//
+// appliedIndex must be the index the state machine has durably applied
+// through (0 if it persists nothing separately). Entries in (appliedIndex,
+// commit] are re-offered as CommittedEntries after restore.
+func RestoreNode(cfg Config, hs HardState, ents []Entry, appliedIndex uint64) *Node {
+	return newNode(cfg, hs, ents, appliedIndex)
+}
+
+func newNode(cfg Config, hs HardState, ents []Entry, appliedIndex uint64) *Node {
 	found := false
 	for _, p := range cfg.Peers {
 		if p == cfg.ID {
@@ -176,6 +193,23 @@ func NewNodeConfig(cfg Config) *Node {
 		heartbeatTick: cfg.HeartbeatTick,
 		rand:          cfg.Rand,
 	}
+	n.term = hs.Term
+	n.vote = hs.Vote
+	if len(ents) > 0 {
+		n.log.append(ents...)
+	}
+	if hs.Commit > 0 {
+		n.log.commitTo(hs.Commit)
+	}
+	// The recovered log is already durable; the state machine has applied
+	// through appliedIndex, so entries in (appliedIndex, commit] are
+	// re-offered on the first Ready.
+	n.stabled = n.log.lastIndex()
+	if appliedIndex > n.log.committed {
+		panic(fmt.Sprintf("raft: applied index %d beyond commit %d", appliedIndex, n.log.committed))
+	}
+	n.log.applied = appliedIndex
+	n.prevHard = n.hardState()
 	n.resetElectionTimer()
 	return n
 }
