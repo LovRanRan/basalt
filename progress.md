@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | Phase 1 — single-node LSM storage engine |
-| Next commit | P1.7 — `feat(engine): open, put, delete, and get with wal replay and memtable flush to l0` |
-| Commits done | 6 / 39 (P1: 6/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
+| Next commit | P1.8 — `feat(engine): merging iterator, scan, version pinning, and seqno read snapshots` |
+| Commits done | 7 / 39 (P1: 7/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
 | Blockers | none |
 | Last updated | 2026-07-04 |
 
@@ -25,7 +25,7 @@ No work happens outside the roadmap without amending it here first.
 
 ## Roadmap
 
-### Phase 1 — single-node LSM storage engine (6/11)
+### Phase 1 — single-node LSM storage engine (7/11)
 
 Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`, crash-safe on every path, with benchmarks.
 
@@ -41,9 +41,9 @@ Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`,
   *Done when: randomized roundtrip on 100k-entry tables + every-byte corruption suite on a small table covering all block/filter/index/footer regions (every-byte-flip is O(size²) — infeasible on multi-MB tables) + hostile crafted-block suite.*
 - [x] **P1.6** `feat(manifest): version-edit log and current pointer for crash-safe file tracking` — VersionEdit log on WAL framing, immutable Version snapshots, CURRENT swap via atomic rename+fsync, obsolete-file collector.
   *Done when: every injected crash point during manifest rotation recovers a consistent live-file set.*
-- [ ] **P1.7** `feat(engine): open, put, delete, and get with wal replay and memtable flush to l0` — Open = manifest recovery + WAL replay; writes go WAL → memtable under a monotonic seqno; background flush to L0 with atomic manifest edit + WAL segment GC.
+- [x] **P1.7** `feat(engine): open, put, delete, and get with wal replay and memtable flush to l0` — Open = manifest recovery + WAL replay; writes go WAL → memtable under a monotonic seqno; background flush to L0 with atomic manifest edit + WAL segment GC.
   *Done when: full crash matrix (after WAL append / after L0 write / after manifest edit) recovers acked writes exactly, race-clean.*
-- [ ] **P1.8** *(P1.5 note: the merge loop must check each sstable child's `Error()` whenever it goes invalid — exhaustion and failure look identical via `Valid()`; memtable iterators cannot fail.)* `feat(engine): merging iterator, scan, version pinning, and seqno read snapshots` — k-way min-heap merge across memtables + SSTables, newest-seqno visibility, tombstone suppression, `Scan(start, end)`; **plus refcounted Version pinning and seqno-based read snapshots** so live iterators survive concurrent flush/compaction file retirement. *(Amended per design review: pinning moved here from the compaction commit — its own mid-scan-flush tests need it.)*
+- [ ] **P1.8** *(P1.5 note: the merge loop must check each sstable child's `Error()` whenever it goes invalid — exhaustion and failure look identical via `Valid()`; memtable iterators cannot fail. P1.7 note: wrap mem/imm/l0 into a refcounted version struct built under mu — Get already captures seq inside the mu section as the snapshot invariant requires; tableHandle needs its own refcount only when P1.9 starts deleting tables.)* `feat(engine): merging iterator, scan, version pinning, and seqno read snapshots` — k-way min-heap merge across memtables + SSTables, newest-seqno visibility, tombstone suppression, `Scan(start, end)`; **plus refcounted Version pinning and seqno-based read snapshots** so live iterators survive concurrent flush/compaction file retirement. *(Amended per design review: pinning moved here from the compaction commit — its own mid-scan-flush tests need it.)*
   *Done when: differential get/scan model test passes across forced multi-table states, including mid-scan flushes.*
 - [ ] **P1.9** `feat(compaction): background leveled compaction with tombstone gc and atomic manifest commits` — level scoring (L0 by file count, L1+ by ~10x byte fanout), overlap-based input picking, shadowed-entry and bottom-level tombstone dropping, atomic file-swap manifest edit; reads proceed via the P1.8 pinned versions. *(P1.4 note: add `Writer.EstimatedSize()` — offset + pending data/index blocks — for output-file splitting; a counting io.Writer lags by the pending blocks.)*
   *Done when: 1M-op churn test holds level invariants + model equivalence, incl. crash-mid-compaction recovery.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P1.7** `feat(engine): open, put, delete, and get with wal replay and memtable flush to l0` · The engine assembles: `basalt.Open/Put/Delete/Get/Close` wiring all five components. Write path mu-serialized (WAL append synced → memtable under consecutive seqs → atomic seq publish — the happens-before edge P1.2 demanded); seal rotates the WAL so segment boundaries align with memtables (`immBound` = fresh segment, everything below is sealed-or-flushed); background flush = durable table (+dirent fsync, honoring P1.6's Apply precondition) → manifest edit{add-file, log-number, last-seq} → copy-on-write L0 prepend → prune. Open: manifest (auto-collects orphans) → open L0 → **pre-delete WAL segments < logNumber** (re-applying flushed batches would panic memtable uniqueness) → replay → fresh writer. Review found a real blocker: **Close could tear down vs/wal/l0 under a still-running flush** when the *write path* poisoned the engine mid-flush — fixed with an explicit `flushing` drain; also: oversized batches no longer poison (`ErrBatchTooLarge`, WAL untouched), **flock on LOCK** (two processes on one dir silently destroy acked data — worse than any crash), WAL prune moved outside mu (per-segment F_FULLFSYNCs were stalling every reader), Get captures seq inside the mu snapshot (deletes a subtle same-object argument; exactly what P1.8 snapshots need). Tests race-clean: crash matrix (WAL-only / orphan table pre-Apply / post-Apply pre-prune, via crash() = drop-all-but-release-flock), 4×4 concurrent writers/readers over tiny memtables, reopen chains, oversized-write health, lock exclusion.
 
 - **2026-07-04** · **P1.6** `feat(manifest): version-edit log and current pointer for crash-safe file tracking` · Landed `internal/manifest`: tag-encoded VersionEdits over the WAL framing, immutable 7-level Version (L0 newest-first, L1+ disjoint-and-sorted — disjointness now *validated at the commit boundary* so a buggy P1.9 edit is refused, not logged), VersionSet with LevelDB-style rotate-on-every-open, atomic CURRENT swap, orphan-number dir scan, auto-collect at open, lock-free `Current()` via atomic.Pointer. Design bug caught while writing tests: crash mid-rotation orphans a manifest whose number the recovered NextFileNum would re-allocate → O_EXCL EEXIST wedges every reopen; fixed by scanning the dir past all on-disk numbers. Review highlights: **missing CURRENT with .sst present now refuses to open** (no crash produces that state; opening empty would let the collector destroy all data); **tail classification** — a damaged record with bytes after its declared end is provably not a torn tail → ErrCorrupt instead of silent truncation (which rotation+collection would make permanent); counter regressions refused; Apply stamps a copy (caller's edit never mutated) and rotation failure is decoupled from the already-durable edit; fd leak on rotation error paths fixed; rotation threshold anchored to snapshot size (avoids O(version) rewrite per edit once the snapshot alone exceeds RotateSize). Tests race-clean: crash injection at all 5 rotation steps + double-crash (recovery rotation crashing at every step, thrice-reopened), three torn-tail shapes vs provable mid-file damage, 200-edit randomized collector-never-deletes-live, orphan bump, level-move edit, codec corruption.
 

@@ -174,6 +174,23 @@ func (w *Writer) rotate() error {
 	return w.openSegment()
 }
 
+// Rotate seals the current segment and starts a fresh one regardless of
+// size. The engine rotates when it seals a memtable so that segment
+// boundaries align with flush units and flushed segments become deletable
+// wholesale.
+func (w *Writer) Rotate() error {
+	if w.err != nil {
+		return w.err
+	}
+	if w.closed {
+		return errors.New("wal: writer is closed")
+	}
+	if err := w.rotate(); err != nil {
+		return w.fail(err)
+	}
+	return nil
+}
+
 // Sync makes all appended records durable; used with SyncManual batching.
 func (w *Writer) Sync() error {
 	if w.err != nil {
@@ -211,19 +228,30 @@ func (w *Writer) Close() error {
 // caller has made durable elsewhere (flushed to SSTables). The segment
 // currently being written is never deleted.
 func (w *Writer) DeleteSegmentsBefore(upto uint64) error {
-	ids, err := listSegments(w.opts.Dir)
+	return DeleteSegmentsBelow(w.opts.Dir, min(upto, w.id))
+}
+
+// DeleteSegmentsBelow removes segments with id < upto without an open
+// Writer. The engine prunes segments already covered by the manifest's log
+// number before replaying at open, so flushed batches are never re-applied.
+// A missing directory is a no-op.
+func DeleteSegmentsBelow(dir string, upto uint64) error {
+	ids, err := listSegments(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 	for _, id := range ids {
-		if id < upto && id != w.id {
-			if err := os.Remove(filepath.Join(w.opts.Dir, segmentName(id))); err != nil {
+		if id < upto {
+			if err := os.Remove(filepath.Join(dir, segmentName(id))); err != nil {
 				return err
 			}
 			// Sync per removal, in ascending id order, so a crash
 			// mid-deletion still leaves a contiguous id range —
 			// Replay treats a gap as corruption.
-			if err := syncDir(w.opts.Dir); err != nil {
+			if err := syncDir(dir); err != nil {
 				return err
 			}
 		}
