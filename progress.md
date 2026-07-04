@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | Phase 3 — hand-written Raft replication |
-| Next commit | P3.8 — `feat(raft): installsnapshot chunked transfer and receiver state swap` |
-| Commits done | 23 / 39 (P1: 11/11 · P2: 5/5 · P3: 7/11 · P4: 0/12) |
+| Next commit | P3.9 — `feat(raft): linearizable reads via readindex with optional leader lease` |
+| Commits done | 24 / 39 (P1: 11/11 · P2: 5/5 · P3: 8/11 · P4: 0/12) |
 | Blockers | none (P1.9/P1.10 make-up review complete — 2 blockers found and fixed) |
 | Last updated | 2026-07-04 |
 
@@ -67,7 +67,7 @@ Goal: Basalt as a real service — gRPC API, CLI client, observability, Docker +
 - [x] **P2.5** `build(release): dockerfile and end-to-end smoke test wired into ci` — multi-stage distroless image; e2e test drives the real CLI against a real server including kill + restart WAL recovery.
   *Done when: CI builds the image and the e2e job passes, incl. data surviving server kill/restart.*
 
-### Phase 3 — hand-written Raft replication (7/11)
+### Phase 3 — hand-written Raft replication (8/11)
 
 Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated state machine, linearizable reads, survives leader kills.
 
@@ -85,7 +85,7 @@ Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated stat
   *Done when: after a 10k-op workload with two forced leader changes + a crash between apply and snapshot, all replicas scan-identical and every acked write present exactly once.*
 - [x] **P3.7** `feat(raft): log compaction and local snapshot create/restore` — size-triggered snapshot via P1.10 `Checkpoint()`, raft log prefix truncation, restart-from-snapshot. *(Split per design review. Make-up-review: with the reserved-prefix scheme Checkpoint needs NO engine change to be a raft snapshot — the drained flush makes the linked tables contain appliedIndex/term/sessions consistent with the data; read lastIncludedIndex/term back via a Scan of the reserved prefix. dst must share the db filesystem, hard links.)*
   *Done when: raft log stays bounded under sustained writes and a node restarts correctly from snapshot + log suffix.*
-- [ ] **P3.8** `feat(raft): installsnapshot chunked transfer and receiver state swap` — leader detects follower behind first index, streams fixed-size chunks; receiver swaps state via `ReplaceWithCheckpoint` and resets its log. *(Make-up-review: ReplaceWithCheckpoint is now blind-retry-safe (verifies src first; takes dataDir's flock so a still-open engine fails loudly). Receiver protocol: Close old DB → ReplaceWithCheckpoint(snapshotDir, dataDir) → reopen. Never call it with the target DB open.)*
+- [x] **P3.8** `feat(raft): installsnapshot chunked transfer and receiver state swap` — leader detects follower behind first index, streams fixed-size chunks; receiver swaps state via `ReplaceWithCheckpoint` and resets its log. *(Make-up-review: ReplaceWithCheckpoint is now blind-retry-safe (verifies src first; takes dataDir's flock so a still-open engine fails loudly). Receiver protocol: Close old DB → ReplaceWithCheckpoint(snapshotDir, dataDir) → reopen. Never call it with the target DB open.)*
   *Done when: a follower behind the compacted log converges to scan-identical state via chunked InstallSnapshot.*
 - [ ] **P3.9** `feat(raft): linearizable reads via readindex with optional leader lease` — ReadIndex quorum confirmation, follower forward/redirect, opt-in leader lease fast path with documented clock-drift tradeoff.
   *Done when: porcupine checker finds zero linearizability violations across seeded partition/failover histories.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P3.8** `feat(raft): installsnapshot chunked transfer and receiver state swap` · When a follower's nextIndex falls below the leader's compacted first index, the leader now emits `MsgSnap` (snapshot last-index/term) instead of a doomed AppendEntries, and optimistically bumps nextIndex past the boundary so it stops spamming. Receiver path (out-of-band, as real raft handles InstallSnapshot in the transport): leader `sm.Snapshot` to a staging dir → chunked file copy (4KB frames modeling offset/done) → receiver verifies meta via `ReadSnapshotMeta`, closes its engine + raft storage, `ReplaceWithCheckpoint` swaps the snapshot in as its data dir, its raft storage is `Rewrite`-reset to the boundary (durable vote preserved, term adopted if the leader's is higher), and it reopens — the engine's `sm.AppliedIndex()` now equals the boundary, so the leader's next AppendEntries replicates the tail normally. `Node.RestoreSnapshot` provides the in-memory variant and refuses a stale snapshot. Tests race-clean: a follower isolated for 1200 commands then healed against a compacted leader is caught up **via a real snapshot install** (asserted the install actually fired) and then keeps up with fresh traffic; stale-snapshot refusal.
 
 - **2026-07-04** · **P3.7** `feat(raft): log compaction and local snapshot create/restore` · raftLog gains a snapshot boundary (snapIndex/snapTerm keeps its term so consistency checks at the boundary work); Node.CompactTo panics past the applied index (a crashed engine could still need those entries); Storage.Rewrite atomically replaces the state file (compact marker + hardstate + suffix) via tmp-fsync-rename, which is what actually bounds disk; RestoreNode takes a Recovered bundle and refuses appliedIndex below the boundary. Engine needed ZERO changes, as the make-up review predicted: sm.Snapshot = Checkpoint + (applied, term) from reserved keys, and the drained flush makes the live engine durable past the boundary the moment it returns — the only-compact-what-recovery-still-has rule falls out of existing semantics. ReadSnapshotMeta reads a snapshot's raft coverage for the P3.8 receiver. Tests race-clean: 3000-command churn with snapshot+compact every 400 keeps every raft state file <100KB with replicas converged; crash-restart from boundary+suffix; compact-beyond-applied panics.
 

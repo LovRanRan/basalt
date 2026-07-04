@@ -52,6 +52,11 @@ const (
 	// leader on heal. Campaign is a real election only after PreVote wins.
 	MsgPreVote
 	MsgPreVoteResp
+	// MsgSnap tells a follower its next entry is below the leader's
+	// compacted log: the caller must transfer the leader's snapshot out of
+	// band and RestoreSnapshot the follower. LogIndex/LogTerm are the
+	// snapshot's last-included index/term.
+	MsgSnap
 )
 
 type Entry struct {
@@ -409,11 +414,18 @@ func (n *Node) sendAppend(to uint64) {
 	prevIndex := next - 1
 	prevTerm, ok := n.log.term(prevIndex)
 	if !ok {
-		// The follower is behind the log's first index; InstallSnapshot
-		// (P3.8) handles this. Until then, retreat to what we have.
-		prevIndex = n.log.firstIndex() - 1
-		prevTerm, _ = n.log.term(prevIndex)
-		next = prevIndex + 1
+		// The follower needs entries the leader has already compacted
+		// away: tell the caller to ship the snapshot instead.
+		n.send(Message{
+			Type:     MsgSnap,
+			To:       to,
+			LogIndex: n.log.snapIndex,
+			LogTerm:  n.log.snapTerm,
+		})
+		// Optimistically assume the snapshot lands; the follower's next
+		// AppendEntries response corrects nextIndex if not.
+		n.next[to] = n.log.snapIndex + 1
+		return
 	}
 	ents := append([]Entry(nil), n.log.slice(next, n.log.lastIndex()+1)...)
 	n.send(Message{
@@ -653,6 +665,34 @@ func (n *Node) Advance(rd Ready) {
 	if len(rd.CommittedEntries) > 0 {
 		n.log.appliedTo(rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
 	}
+}
+
+// RestoreSnapshot installs a snapshot boundary on a follower that has just
+// swapped in the leader's state (the caller performed the out-of-band
+// transfer and engine swap). It discards the entire log below index, sets
+// the boundary to (index, term), and marks everything through index
+// committed and applied. Reverts nothing if the follower is already past
+// index (a stale snapshot).
+func (n *Node) RestoreSnapshot(index, term uint64) bool {
+	if index <= n.log.committed && index <= n.log.snapIndex {
+		return false
+	}
+	if index <= n.log.applied {
+		return false
+	}
+	n.log.entries = nil
+	n.log.offset = index + 1
+	n.log.snapIndex, n.log.snapTerm = index, term
+	n.log.committed = index
+	n.log.applied = index
+	n.stabled = index
+	n.role = Follower
+	// Acknowledge to the leader so it advances our match past the
+	// snapshot and resumes normal replication of the tail.
+	if n.lead != 0 {
+		n.send(Message{Type: MsgAppResp, To: n.lead, LogIndex: index})
+	}
+	return true
 }
 
 // CompactTo folds the log prefix through index into a snapshot boundary.

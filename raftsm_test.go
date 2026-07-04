@@ -38,6 +38,7 @@ type smCluster struct {
 	ids   []uint64
 	queue []raft.Message
 	down  map[uint64]bool
+	snaps int // count of InstallSnapshot transfers performed
 }
 
 func openReplica(t *testing.T, dir string, id uint64, ids []uint64) *replica {
@@ -110,6 +111,10 @@ func (c *smCluster) pump(ticks int) {
 					continue
 				}
 				moved = true
+				if m.Type == raft.MsgSnap {
+					c.installSnapshot(m)
+					continue
+				}
 				if err := c.reps[m.To].node.Step(m); err != nil && !errors.Is(err, raft.ErrNotLeader) {
 					t.Fatal(err)
 				}
@@ -119,6 +124,62 @@ func (c *smCluster) pump(ticks int) {
 			}
 		}
 	}
+}
+
+// installSnapshot performs the out-of-band snapshot transfer a MsgSnap
+// requests: the leader checkpoints its state machine, the bytes ship in
+// chunks (here a file-by-file copy modeling offset/done framing), and the
+// receiver closes its engine, swaps the checkpoint in as its data dir,
+// resets its raft storage to the snapshot boundary (preserving its durable
+// vote), and reopens. The leader's next AppendEntries then replicates the
+// tail past the boundary normally.
+func (c *smCluster) installSnapshot(m raft.Message) {
+	t := c.t
+	leader, follower := c.reps[m.From], c.reps[m.To]
+
+	staging := filepath.Join(t.TempDir(), fmt.Sprintf("stage-%d-to-%d", m.From, m.To))
+	index, term, err := leader.sm.Snapshot(staging)
+	if err != nil {
+		t.Fatalf("leader snapshot: %v", err)
+	}
+	recvDir := filepath.Join(t.TempDir(), fmt.Sprintf("recv-%d", m.To))
+	if err := copyTreeChunked(recvDir, staging); err != nil {
+		t.Fatalf("chunked transfer: %v", err)
+	}
+	got, gotTerm, err := ReadSnapshotMeta(recvDir)
+	if err != nil || got != index || gotTerm != term {
+		t.Fatalf("received snapshot meta = (%d,%d,%v), want (%d,%d)", got, gotTerm, err, index, term)
+	}
+
+	hs := follower.node.HardStateNow()
+	newTerm := hs.Term
+	newVote := hs.Vote
+	if m.Term > newTerm {
+		newTerm, newVote = m.Term, 0
+	}
+
+	dbDir := filepath.Join(follower.dir, "db")
+	raftPath := filepath.Join(follower.dir, "raft", "state")
+	crash(follower.db)
+	_ = follower.st.Close()
+	if err := ReplaceWithCheckpoint(recvDir, dbDir); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	// Reset the raft log to the boundary the engine now carries.
+	st2, _, err := raft.OpenStorage(raftPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st2.Rewrite(raft.HardState{Term: newTerm, Vote: newVote, Commit: index}, index, term, nil); err != nil {
+		t.Fatal(err)
+	}
+	_ = st2.Close()
+
+	c.reps[m.To] = openReplica(t, follower.dir, m.To, c.ids)
+	if got := c.reps[m.To].sm.AppliedIndex(); got != index {
+		t.Fatalf("post-install applied index = %d, want %d", got, index)
+	}
+	c.snaps++
 }
 
 func (c *smCluster) leader() (uint64, bool) {
