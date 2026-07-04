@@ -7,15 +7,88 @@ import (
 	"net"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	basaltv1 "github.com/LovRanRan/basalt/api/basalt/v1"
 	"github.com/LovRanRan/basalt/internal/shard"
 )
+
+// transientRoute reports a retryable routing error — a group momentarily
+// leaderless (election in progress) or a stale-map redirect. A real client
+// (cluster.Client) retries these; the tests drive raw per-node stubs, so they
+// retry explicitly rather than fail on a transient election.
+func transientRoute(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch st.Code() {
+	case codes.Unavailable, codes.DeadlineExceeded, codes.Aborted:
+		return true
+	case codes.FailedPrecondition:
+		return strings.HasPrefix(st.Message(), "not-leader:")
+	default:
+		return false
+	}
+}
+
+// retryRPC runs fn until it succeeds or a transient error stops being
+// transient (or the budget is spent), mirroring cluster.Client's retry loop.
+func retryRPC(t *testing.T, ctx context.Context, fn func() error) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		err := fn()
+		if err == nil {
+			return
+		}
+		if !transientRoute(err) || time.Now().After(deadline) {
+			t.Fatalf("rpc: %v", err)
+		}
+		select {
+		case <-time.After(20 * time.Millisecond):
+		case <-ctx.Done():
+			t.Fatalf("rpc: %v", ctx.Err())
+		}
+	}
+}
+
+func (sc *shardedCluster) mustPut(t *testing.T, ctx context.Context, node uint64, k, v string) {
+	t.Helper()
+	retryRPC(t, ctx, func() error {
+		_, err := sc.clients[node].Put(ctx, &basaltv1.PutRequest{Key: []byte(k), Value: []byte(v)})
+		return err
+	})
+}
+
+func (sc *shardedCluster) mustGet(t *testing.T, ctx context.Context, node uint64, k string) *basaltv1.GetResponse {
+	t.Helper()
+	var resp *basaltv1.GetResponse
+	retryRPC(t, ctx, func() error {
+		r, err := sc.clients[node].Get(ctx, &basaltv1.GetRequest{Key: []byte(k)})
+		if err != nil {
+			return err
+		}
+		resp = r
+		return nil
+	})
+	return resp
+}
+
+func (sc *shardedCluster) mustDelete(t *testing.T, ctx context.Context, node uint64, k string) {
+	t.Helper()
+	retryRPC(t, ctx, func() error {
+		_, err := sc.clients[node].Delete(ctx, &basaltv1.DeleteRequest{Key: []byte(k)})
+		return err
+	})
+}
 
 // shardedCluster boots a 3-node/3-group sharded cluster with the routing
 // front door and returns per-node client connections.
@@ -87,28 +160,20 @@ func TestRouterAnyNodeServesAllOps(t *testing.T) {
 	// each to whichever node leads the owning group.
 	const n = 300
 	for i := 0; i < n; i++ {
-		node := uint64(i%3 + 1)
-		_, err := sc.clients[node].Put(ctx, &basaltv1.PutRequest{
-			Key: []byte(fmt.Sprintf("key-%04d", i)), Value: []byte(fmt.Sprintf("v-%d", i)),
-		})
-		if err != nil {
-			t.Fatalf("put %d via node %d: %v", i, node, err)
-		}
+		sc.mustPut(t, ctx, uint64(i%3+1), fmt.Sprintf("key-%04d", i), fmt.Sprintf("v-%d", i))
 	}
 	// Reads from yet another node see every write, wherever it landed.
 	for i := 0; i < n; i++ {
 		node := uint64((i+1)%3 + 1)
-		resp, err := sc.clients[node].Get(ctx, &basaltv1.GetRequest{Key: []byte(fmt.Sprintf("key-%04d", i))})
-		if err != nil || !resp.GetFound() || string(resp.GetValue()) != fmt.Sprintf("v-%d", i) {
-			t.Fatalf("get %d via node %d = (%q, %v, %v)", i, node, resp.GetValue(), resp.GetFound(), err)
+		resp := sc.mustGet(t, ctx, node, fmt.Sprintf("key-%04d", i))
+		if !resp.GetFound() || string(resp.GetValue()) != fmt.Sprintf("v-%d", i) {
+			t.Fatalf("get %d via node %d = (%q, %v)", i, node, resp.GetValue(), resp.GetFound())
 		}
 	}
 	// Delete via a third node, verify gone.
-	if _, err := sc.clients[3].Delete(ctx, &basaltv1.DeleteRequest{Key: []byte("key-0100")}); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	if resp, err := sc.clients[1].Get(ctx, &basaltv1.GetRequest{Key: []byte("key-0100")}); err != nil || resp.GetFound() {
-		t.Fatalf("deleted key still present via node 1: %v %v", resp.GetFound(), err)
+	sc.mustDelete(t, ctx, 3, "key-0100")
+	if resp := sc.mustGet(t, ctx, 1, "key-0100"); resp.GetFound() {
+		t.Fatal("deleted key still present via node 1")
 	}
 }
 
@@ -126,9 +191,7 @@ func TestRouterScatterGatherScanIsGloballyOrdered(t *testing.T) {
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("key-%04d", i)
 		v := fmt.Sprintf("v-%d", i)
-		if _, err := sc.clients[uint64(i%3+1)].Put(ctx, &basaltv1.PutRequest{Key: []byte(k), Value: []byte(v)}); err != nil {
-			t.Fatalf("put %d: %v", i, err)
-		}
+		sc.mustPut(t, ctx, uint64(i%3+1), k, v)
 		want[k] = v
 	}
 	// Confirm the keys really did land in more than one group (otherwise the
@@ -145,21 +208,26 @@ func TestRouterScatterGatherScanIsGloballyOrdered(t *testing.T) {
 	// though each group holds a hash-scattered subset.
 	collect := func(node uint64, req *basaltv1.ScanRequest) []*basaltv1.KeyValue {
 		t.Helper()
-		stream, err := sc.clients[node].Scan(ctx, req)
-		if err != nil {
-			t.Fatal(err)
-		}
 		var got []*basaltv1.KeyValue
-		for {
-			resp, err := stream.Recv()
-			if err == io.EOF {
-				break
-			}
+		retryRPC(t, ctx, func() error {
+			stream, err := sc.clients[node].Scan(ctx, req)
 			if err != nil {
-				t.Fatal(err)
+				return err
 			}
-			got = append(got, resp.GetPairs()...)
-		}
+			var acc []*basaltv1.KeyValue
+			for {
+				resp, err := stream.Recv()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					return err
+				}
+				acc = append(acc, resp.GetPairs()...)
+			}
+			got = acc
+			return nil
+		})
 		return got
 	}
 
