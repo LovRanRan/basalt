@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | Phase 1 — single-node LSM storage engine |
-| Next commit | P1.6 — `feat(manifest): version-edit log and current pointer for crash-safe file tracking` |
-| Commits done | 5 / 39 (P1: 5/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
+| Next commit | P1.7 — `feat(engine): open, put, delete, and get with wal replay and memtable flush to l0` |
+| Commits done | 6 / 39 (P1: 6/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
 | Blockers | none |
 | Last updated | 2026-07-04 |
 
@@ -25,7 +25,7 @@ No work happens outside the roadmap without amending it here first.
 
 ## Roadmap
 
-### Phase 1 — single-node LSM storage engine (5/11)
+### Phase 1 — single-node LSM storage engine (6/11)
 
 Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`, crash-safe on every path, with benchmarks.
 
@@ -39,7 +39,7 @@ Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`,
   *Done when: golden byte-layout test passes; out-of-order input fails with a typed error.*
 - [x] **P1.5** `feat(sstable): reader with bloom-guarded point gets and seekable block iterators` — footer/checksum validation, bloom → index binary search → block restart-point search, lazy block loading, typed `ErrCorruption`.
   *Done when: randomized roundtrip on 100k-entry tables + every-byte corruption suite on a small table covering all block/filter/index/footer regions (every-byte-flip is O(size²) — infeasible on multi-MB tables) + hostile crafted-block suite.*
-- [ ] **P1.6** `feat(manifest): version-edit log and current pointer for crash-safe file tracking` — VersionEdit log on WAL framing, immutable Version snapshots, CURRENT swap via atomic rename+fsync, obsolete-file collector.
+- [x] **P1.6** `feat(manifest): version-edit log and current pointer for crash-safe file tracking` — VersionEdit log on WAL framing, immutable Version snapshots, CURRENT swap via atomic rename+fsync, obsolete-file collector.
   *Done when: every injected crash point during manifest rotation recovers a consistent live-file set.*
 - [ ] **P1.7** `feat(engine): open, put, delete, and get with wal replay and memtable flush to l0` — Open = manifest recovery + WAL replay; writes go WAL → memtable under a monotonic seqno; background flush to L0 with atomic manifest edit + WAL segment GC.
   *Done when: full crash matrix (after WAL append / after L0 write / after manifest edit) recovers acked writes exactly, race-clean.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P1.6** `feat(manifest): version-edit log and current pointer for crash-safe file tracking` · Landed `internal/manifest`: tag-encoded VersionEdits over the WAL framing, immutable 7-level Version (L0 newest-first, L1+ disjoint-and-sorted — disjointness now *validated at the commit boundary* so a buggy P1.9 edit is refused, not logged), VersionSet with LevelDB-style rotate-on-every-open, atomic CURRENT swap, orphan-number dir scan, auto-collect at open, lock-free `Current()` via atomic.Pointer. Design bug caught while writing tests: crash mid-rotation orphans a manifest whose number the recovered NextFileNum would re-allocate → O_EXCL EEXIST wedges every reopen; fixed by scanning the dir past all on-disk numbers. Review highlights: **missing CURRENT with .sst present now refuses to open** (no crash produces that state; opening empty would let the collector destroy all data); **tail classification** — a damaged record with bytes after its declared end is provably not a torn tail → ErrCorrupt instead of silent truncation (which rotation+collection would make permanent); counter regressions refused; Apply stamps a copy (caller's edit never mutated) and rotation failure is decoupled from the already-durable edit; fd leak on rotation error paths fixed; rotation threshold anchored to snapshot size (avoids O(version) rewrite per edit once the snapshot alone exceeds RotateSize). Tests race-clean: crash injection at all 5 rotation steps + double-crash (recovery rotation crashing at every step, thrice-reopened), three torn-tail shapes vs provable mid-file damage, 200-edit randomized collector-never-deletes-live, orphan bump, level-move edit, codec corruption.
 
 - **2026-07-04** · **P1.5** `feat(sstable): reader with bloom-guarded point gets and seekable block iterators` · Disk format closes the loop: `Reader` (eager footer/filter/index validation, lazy crc-verified data blocks, `Get(userKey, seq)` via bloom → index binary search → restart binary search), `Iterator` (First/SeekGE/Next/Error, lazy block hops), typed `ErrCorruption` everywhere. Review theme: **crc protects against accidents, not adversaries** — two blockers were crc-valid crafted files that panic the reader (uvarint sum wrapping the bounds check; sub-trailer restart keys hitting `base.Compare`), plus a quadratic-allocation DoS via prefix-extended index entries and 32-bit int truncation in restart parsing. All fixed centrally (overflow-safe two-part bounds check, trailer check moved into `decodeNext`, index requires full keys, u64 arithmetic) and pinned by a new hostile crafted-block suite — the every-byte-flip test can't reach post-crc validators, which is exactly how the panics shipped. Index/block disagreement now surfaces as corruption instead of a silent wrong answer. Tests race-clean: 100k roundtrip (iteration + 20k exact-seq gets + absent keys + 10k SeekGE vs reference), every-byte flips, hostile blocks/index, concurrent readers under -race, aliasing contracts. Done_when wording amended (small table for the O(size²) flip suite).
 
