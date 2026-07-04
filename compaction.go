@@ -93,6 +93,7 @@ func (db *DB) pickCompactionLocked() *compaction {
 			h := db.tables[m.FileNum]
 			if h == nil {
 				db.bgErr = fmt.Errorf("basalt: compaction input %06d has no open handle", m.FileNum)
+				db.cond.Broadcast() // wake any writer stalled on the L0 stop threshold
 				return nil
 			}
 			c.inputs[side] = append(c.inputs[side], h)
@@ -201,6 +202,14 @@ func (db *DB) compact(c *compaction) {
 			delete(db.pending, n)
 		}
 	}
+	// bail closes a half-written output before poisoning the engine, so a
+	// failure mid-output never leaks the fd for the process's life.
+	bail := func(err error) {
+		if f != nil {
+			_ = f.Close()
+		}
+		finish(err)
+	}
 	closeOutput := func() error {
 		props, err := w.Finish()
 		if err == nil {
@@ -229,7 +238,7 @@ func (db *DB) compact(c *compaction) {
 	for m.First(); m.Valid(); m.Next() {
 		ik, err := base.DecodeInternalKey(m.Key())
 		if err != nil {
-			finish(err)
+			bail(err)
 			return
 		}
 		if haveUK && bytes.Equal(ik.UserKey, lastUK) {
@@ -249,42 +258,42 @@ func (db *DB) compact(c *compaction) {
 			var err error
 			f, err = os.OpenFile(manifest.TableFileName(db.dir, num), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 			if err != nil {
-				finish(err)
+				bail(err)
 				return
 			}
 			bw = bufio.NewWriterSize(f, 64<<10)
 			w = sstable.NewWriter(bw, sstable.WriterOptions{})
 		}
 		if err := w.Add(m.Key(), m.Value()); err != nil {
-			finish(err)
+			bail(err)
 			return
 		}
 		if w.EstimatedSize() >= uint64(db.opts.TargetFileSize) {
 			if err := closeOutput(); err != nil {
-				finish(err)
+				bail(err)
 				return
 			}
 		}
 	}
 	if err := m.Error(); err != nil {
-		finish(err)
+		bail(err)
 		return
 	}
 	if w != nil {
 		if err := closeOutput(); err != nil {
-			finish(err)
+			bail(err)
 			return
 		}
 	}
 	if len(outputs) > 0 {
 		if err := syncDir(db.dir); err != nil {
-			finish(err)
+			bail(err)
 			return
 		}
 	}
 	if db.hookBeforeCompactApply != nil {
 		if err := db.hookBeforeCompactApply(); err != nil {
-			finish(err)
+			bail(err)
 			return
 		}
 	}
@@ -294,6 +303,9 @@ func (db *DB) compact(c *compaction) {
 	for _, meta := range outputs {
 		h, err := db.openTable(meta)
 		if err != nil {
+			for _, nh := range newHandles {
+				nh.unref()
+			}
 			finish(err)
 			return
 		}
