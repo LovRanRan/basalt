@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | Phase 3 — hand-written Raft replication |
-| Next commit | P3.7 — `feat(raft): log compaction and local snapshot create/restore` |
-| Commits done | 22 / 39 (P1: 11/11 · P2: 5/5 · P3: 6/11 · P4: 0/12) |
+| Next commit | P3.8 — `feat(raft): installsnapshot chunked transfer and receiver state swap` |
+| Commits done | 23 / 39 (P1: 11/11 · P2: 5/5 · P3: 7/11 · P4: 0/12) |
 | Blockers | none (P1.9/P1.10 make-up review complete — 2 blockers found and fixed) |
 | Last updated | 2026-07-04 |
 
@@ -67,7 +67,7 @@ Goal: Basalt as a real service — gRPC API, CLI client, observability, Docker +
 - [x] **P2.5** `build(release): dockerfile and end-to-end smoke test wired into ci` — multi-stage distroless image; e2e test drives the real CLI against a real server including kill + restart WAL recovery.
   *Done when: CI builds the image and the e2e job passes, incl. data surviving server kill/restart.*
 
-### Phase 3 — hand-written Raft replication (6/11)
+### Phase 3 — hand-written Raft replication (7/11)
 
 Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated state machine, linearizable reads, survives leader kills.
 
@@ -83,7 +83,7 @@ Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated stat
   *Done when: crash-restart at any fsync boundary rejoins with no double-vote, term regression, or committed-entry loss.*
 - [x] **P3.6** `feat(raft): apply committed entries to the lsm engine state machine` — StateMachine interface over the engine using P1.10 WriteBatch; clientID+seq dedup for exactly-once applies; completion futures. **Durability contract: engine WAL is disabled under raft — the raft log + snapshots are the sole durability source; recovery re-applies from the snapshot index.** *(Amended per design review; replica convergence asserted as logical scan equivalence.)* **Make-up-review prescriptions (start here): (1) keep seqnos engine-private — do NOT add ApplyAt(batch,seq); the StateMachine writes appliedIndex + entry term + clientID/seq dedup into the SAME Batch as user ops under a reserved key prefix (\x00!raft/, rejected from user Put), so recovery is EXACT prefix replay, not idempotent re-apply — sidesteps the memtable duplicate-key panic; relies on the now-documented P1.7 invariant that a seal never splits a batch. (2) Add Options.DisableWAL (not just DisableWALSync): Open still prunes+replays the wal dir but FAILS if any record survives, skips OpenWriter, seals must not rotate a nil wal.**
   *Done when: after a 10k-op workload with two forced leader changes + a crash between apply and snapshot, all replicas scan-identical and every acked write present exactly once.*
-- [ ] **P3.7** `feat(raft): log compaction and local snapshot create/restore` — size-triggered snapshot via P1.10 `Checkpoint()`, raft log prefix truncation, restart-from-snapshot. *(Split per design review. Make-up-review: with the reserved-prefix scheme Checkpoint needs NO engine change to be a raft snapshot — the drained flush makes the linked tables contain appliedIndex/term/sessions consistent with the data; read lastIncludedIndex/term back via a Scan of the reserved prefix. dst must share the db filesystem, hard links.)*
+- [x] **P3.7** `feat(raft): log compaction and local snapshot create/restore` — size-triggered snapshot via P1.10 `Checkpoint()`, raft log prefix truncation, restart-from-snapshot. *(Split per design review. Make-up-review: with the reserved-prefix scheme Checkpoint needs NO engine change to be a raft snapshot — the drained flush makes the linked tables contain appliedIndex/term/sessions consistent with the data; read lastIncludedIndex/term back via a Scan of the reserved prefix. dst must share the db filesystem, hard links.)*
   *Done when: raft log stays bounded under sustained writes and a node restarts correctly from snapshot + log suffix.*
 - [ ] **P3.8** `feat(raft): installsnapshot chunked transfer and receiver state swap` — leader detects follower behind first index, streams fixed-size chunks; receiver swaps state via `ReplaceWithCheckpoint` and resets its log. *(Make-up-review: ReplaceWithCheckpoint is now blind-retry-safe (verifies src first; takes dataDir's flock so a still-open engine fails loudly). Receiver protocol: Close old DB → ReplaceWithCheckpoint(snapshotDir, dataDir) → reopen. Never call it with the target DB open.)*
   *Done when: a follower behind the compacted log converges to scan-identical state via chunked InstallSnapshot.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P3.7** `feat(raft): log compaction and local snapshot create/restore` · raftLog gains a snapshot boundary (snapIndex/snapTerm keeps its term so consistency checks at the boundary work); Node.CompactTo panics past the applied index (a crashed engine could still need those entries); Storage.Rewrite atomically replaces the state file (compact marker + hardstate + suffix) via tmp-fsync-rename, which is what actually bounds disk; RestoreNode takes a Recovered bundle and refuses appliedIndex below the boundary. Engine needed ZERO changes, as the make-up review predicted: sm.Snapshot = Checkpoint + (applied, term) from reserved keys, and the drained flush makes the live engine durable past the boundary the moment it returns — the only-compact-what-recovery-still-has rule falls out of existing semantics. ReadSnapshotMeta reads a snapshot's raft coverage for the P3.8 receiver. Tests race-clean: 3000-command churn with snapshot+compact every 400 keeps every raft state file <100KB with replicas converged; crash-restart from boundary+suffix; compact-beyond-applied panics.
 
 - **2026-07-04** · **P3.6** `feat(raft): apply committed entries to the lsm engine state machine` · Raft meets the engine, exactly per the make-up-review prescriptions: `Options.DisableWAL` (raft log is the sole durability source; opening a WAL-ful dir with it set fails until drained; seal/flush/write all handle a nil wal), reserved key range `\x00!raft/` (user Put/Get/Scan reject/skip it; `ErrReservedKey`), and `StateMachine`: each committed entry becomes ONE atomic engine batch carrying the user ops + the client session update + the applied index/term — so the engine's recovered state always names the exact raft prefix it contains, and recovery is **exact prefix replay from `sm.AppliedIndex()`** (fed to `RestoreNode`), never idempotent re-apply. ClientID/seq dedup: a duplicate (client, seq) — even with a different payload — is skipped while still advancing the applied index durably; sessions rebuild from a reserved-range scan at open. Completion futures deferred to P3.10 where the server owns the apply loop. Test-harness lesson: default deterministic node RNGs share one sequence → identical timeouts → eternal split votes; per-node seeds required. Tests race-clean: **10k commands across two forced leader changes → three replicas scan-identical**; crash-restart of a WAL-less follower replays the exact lost suffix; malicious duplicate applies exactly once; reserved range invisible and protected.
 
