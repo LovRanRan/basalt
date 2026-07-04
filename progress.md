@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | **Phases 1-3 COMPLETE** → Phase 4 — sharding and hardening |
-| Next commit | P4.3 — `feat(cluster): static cluster config file and multi-node bootstrap tooling` |
-| Commits done | 29 / 39 (P1: 11/11 · P2: 5/5 · P3: 11/11 · P4: 2/12) |
+| Next commit | P4.4 — `feat(router): shard-aware request routing with cross-group ordered scan` |
+| Commits done | 30 / 39 (P1: 11/11 · P2: 5/5 · P3: 11/11 · P4: 3/12) |
 | Blockers | none (P1.9/P1.10 make-up review complete — 2 blockers found and fixed) |
 | Last updated | 2026-07-04 |
 
@@ -94,7 +94,7 @@ Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated stat
 - [x] **P3.11** `test(raft): leader-kill smoke test and replication benchmarks` — black-box process-level leader-kill smoke test plus replicated write throughput/latency benchmarks with baseline numbers recorded. *(Trimmed per design review — the full chaos harness lives in Phase 4.)*
   *Done when: smoke test survives repeated leader kills with zero acked-write loss; `make bench-raft` emits baselines.*
 
-### Phase 4 — sharding and hardening (2/12)
+### Phase 4 — sharding and hardening (3/12)
 
 Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchmark report, docs. *(Design review: vnode ring replaced by fixed hash slots; cluster config lands before the router; shard-map distribution inserted; rebalance split in two.)*
 
@@ -102,7 +102,7 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
   *Done when: one process hosts multiple independently electing/replicating groups with the prior suite still green.*
 - [x] **P4.2** `feat(shard): fixed hash-slot table mapping keys to raft groups` — 256 hash slots → groupID (Redis-cluster style), deterministic cross-platform hash, versioned ShardMap type; pure routing math, no I/O. *(Replaced consistent-hash vnode ring per design review: slots make ownership contiguous and per-slot migration well-defined.)*
   *Done when: Lookup is deterministic and balanced; slot reassignment provably moves only the reassigned slots' keys (unit + fuzz tests).*
-- [ ] **P4.3** `feat(cluster): static cluster config file and multi-node bootstrap tooling` — declarative YAML (nodes, groups, slot assignment, placement), fail-fast validation, `make cluster-up` boots a local 3-node/3-group cluster. *(Moved before the router per design review — the router's integration test needs this tooling.)*
+- [x] **P4.3** `feat(cluster): static cluster config file and multi-node bootstrap tooling` — declarative YAML (nodes, groups, slot assignment, placement), fail-fast validation, `make cluster-up` boots a local 3-node/3-group cluster. *(Moved before the router per design review — the router's integration test needs this tooling.)*
   *Done when: `make cluster-up` starts a 3-node/3-group cluster from one config; malformed configs rejected with actionable errors.*
 - [ ] **P4.4** `feat(router): shard-aware request routing with cross-group ordered scan` — front door routes point ops to owning group preserving leader redirects; Scan scatter-gathers all groups and merge-sorts into one ordered stream; client caches the shard map.
   *Done when: all four ops succeed against any node of the multi-group cluster with correct ownership and globally ordered scans.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P4.3** `feat(cluster): static cluster config file and multi-node bootstrap tooling` · Declarative YAML cluster config (`cluster.FileConfig`: groups + nodes[id/raft/client]) with **fail-fast validation naming the exact offending field** (11 cases tested: zero/dup group, even cluster size, dup id, missing/dup address, unknown field). `basalt-cluster` binary boots one node from the config — hosts every group, serves the raft transport + a shard-routing KV service (`shardKV`: key's slot → owning group → propose/read locally or redirect). `make cluster-up` + `scripts/cluster-up.sh` boot a local 3-node/3-group cluster from `examples/cluster.yaml` and smoke put/get (verified end-to-end: leaders settle, sharded round-trip works). The plain CLI isn't cluster-aware yet so the smoke tries each node — full client shard-map routing + scatter-gather scan is P4.4. Tests race-clean: config validation, derived Peers/ShardMap, and a full in-process bootstrap-from-config that round-trips sharded keys.
 
 - **2026-07-04** · **P4.2** `feat(shard): fixed hash-slot table mapping keys to raft groups` · `internal/shard`: 256 fixed hash slots (crc32c mod NumSlots — deterministic, platform-independent), a versioned immutable `ShardMap` assigning each slot to a group, with `Lookup`/`Group`/`SlotsFor`/`Groups` and copy-on-write `WithSlot` (move one slot, bump epoch) / `WithReassign` (drain a group wholesale). This is the design-review's replacement for a consistent-hash vnode ring: fixed slots make ownership explicit and migration a clean per-slot operation — moving a slot moves exactly its keys and disturbs no other slot (unit-tested: a single-slot move leaves all 255 others byte-identical). The epoch is the fencing token P4.6 will use. Pure routing math, no I/O. Tests race-clean incl. balance-within-tolerance, Lookup==Group(Slot), drain-a-group, and a 5.5M-exec fuzz over key bytes.
 

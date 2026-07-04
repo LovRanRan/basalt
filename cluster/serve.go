@@ -6,6 +6,7 @@ import (
 	"google.golang.org/grpc"
 
 	basaltv1 "github.com/LovRanRan/basalt/api/basalt/v1"
+	"github.com/LovRanRan/basalt/internal/shard"
 )
 
 // Servers holds the two gRPC servers a member runs: the peer transport
@@ -33,6 +34,20 @@ func (n *Node) Serve(raftLis, kvLis net.Listener) *Servers {
 
 	ks := grpc.NewServer()
 	basaltv1.RegisterKVServiceServer(ks, newKVServer(n))
+	go func() { _ = ks.Serve(kvLis) }()
+
+	return &Servers{Raft: rs, KV: ks}
+}
+
+// ServeSharded is Serve with a shard-routing KV service: point operations
+// route to the group owning the key's slot per the shard map.
+func (n *Node) ServeSharded(raftLis, kvLis net.Listener, smap *shard.ShardMap) *Servers {
+	rs := grpc.NewServer()
+	basaltv1.RegisterRaftServiceServer(rs, &raftServer{n: n})
+	go func() { _ = rs.Serve(raftLis) }()
+
+	ks := grpc.NewServer()
+	basaltv1.RegisterKVServiceServer(ks, newShardKV(n, smap))
 	go func() { _ = ks.Serve(kvLis) }()
 
 	return &Servers{Raft: rs, KV: ks}

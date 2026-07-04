@@ -1,0 +1,8 @@
+# A 3-node, 3-group Basalt cluster on loopback. Every node hosts all three
+# groups (each a 3-way replicated raft); the 256 hash slots spread across
+# the groups. Boot with: make cluster-up
+groups: [10, 20, 30]
+nodes:
+  - { id: 1, raft: 127.0.0.1:8101, client: 127.0.0.1:9101 }
+  - { id: 2, raft: 127.0.0.1:8102, client: 127.0.0.1:9102 }
+  - { id: 3, raft: 127.0.0.1:8103, client: 127.0.0.1:9103 }

@@ -1,6 +1,6 @@
 # Local and CI invocations stay identical: CI calls these targets.
 
-.PHONY: build vet lint test bench-smoke generate proto-lint proto-drift
+.PHONY: build vet lint test bench-smoke generate proto-lint proto-drift cluster-up
 
 build:
 	go build ./...
@@ -29,3 +29,7 @@ proto-lint:
 # proto-drift fails when committed stubs do not match the proto sources.
 proto-drift: generate
 	git diff --exit-code -- api
+
+# cluster-up boots a local 3-node/3-group cluster from examples/cluster.yaml.
+cluster-up:
+	./scripts/cluster-up.sh
