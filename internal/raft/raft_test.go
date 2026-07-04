@@ -220,31 +220,32 @@ func TestSingleNodeLifecycle(t *testing.T) {
 	}
 }
 
-func TestCampaignEmitsVoteRequests(t *testing.T) {
+func TestCampaignEmitsPreVoteRequests(t *testing.T) {
 	n := NewNode(1, []uint64{1, 2, 3})
 	n.Campaign()
 	if n.Role() != Candidate {
 		t.Fatalf("role = %v, want candidate", n.Role())
 	}
+	// PreVote must NOT bump the term or record a vote — that is the whole
+	// point of the pre-round.
+	if n.Term() != 0 || n.vote != 0 {
+		t.Fatalf("prevote mutated durable state: term=%d vote=%d", n.Term(), n.vote)
+	}
 	_, sent := drain(t, n)
-	votes := 0
 	seen := map[uint64]bool{}
 	for _, m := range sent {
-		if m.Type != MsgVote {
+		if m.Type != MsgPreVote {
 			t.Fatalf("unexpected message %v", m)
 		}
-		if m.Term != 1 || m.From != 1 {
-			t.Fatalf("vote request %+v", m)
+		if m.Term != 1 || m.From != 1 { // probe term = term+1, not adopted
+			t.Fatalf("prevote request %+v", m)
 		}
 		seen[m.To] = true
-		votes++
 	}
-	if votes != 2 || !seen[2] || !seen[3] {
-		t.Fatalf("vote requests to %v", seen)
+	if len(seen) != 2 || !seen[2] || !seen[3] {
+		t.Fatalf("prevote requests to %v", seen)
 	}
-	// The bumped term with our self-vote must have been surfaced for
-	// persistence before those messages were handed out.
-	if n.prevHard.Term != 1 || n.prevHard.Vote != 1 {
-		t.Fatalf("hard state not surfaced: %+v", n.prevHard)
+	if n.prevHard.Term != 0 {
+		t.Fatalf("prevote surfaced a hard state term: %+v", n.prevHard)
 	}
 }

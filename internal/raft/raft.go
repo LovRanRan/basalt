@@ -47,6 +47,11 @@ const (
 	// MsgAppResp reports LogIndex = highest matching index on success, or
 	// Reject with LogIndex hinting where to back off.
 	MsgAppResp
+	// MsgPreVote / MsgPreVoteResp are the PreVote round: a probe that does
+	// NOT bump the term, so a partitioned node cannot depose a healthy
+	// leader on heal. Campaign is a real election only after PreVote wins.
+	MsgPreVote
+	MsgPreVoteResp
 )
 
 type Entry struct {
@@ -87,6 +92,20 @@ type Ready struct {
 // ErrNotLeader rejects proposals stepped into a non-leader.
 var ErrNotLeader = errors.New("raft: not the leader")
 
+// Config parameters a Node. ElectionTick is the baseline election timeout
+// in Tick units; the actual timeout is randomized in [ElectionTick,
+// 2*ElectionTick) from Rand so split votes resolve. HeartbeatTick is the
+// leader's heartbeat period. Rand returns a non-negative int below its
+// argument (an injected math/rand for determinism); nil uses a fixed
+// sequence so a Node without a Config is still deterministic.
+type Config struct {
+	ID            uint64
+	Peers         []uint64
+	ElectionTick  int
+	HeartbeatTick int
+	Rand          func(n int) int
+}
+
 // Node is the consensus state machine for one member. Not safe for
 // concurrent use: the owner serializes Step/Tick/Ready/Advance.
 type Node struct {
@@ -101,6 +120,9 @@ type Node struct {
 	log   *raftLog
 	votes map[uint64]bool
 
+	// preVotes tallies a PreVote round separately from real votes.
+	preVotes map[uint64]bool
+
 	// Leader replication state (Figure 2's nextIndex/matchIndex).
 	next  map[uint64]uint64
 	match map[uint64]uint64
@@ -112,27 +134,72 @@ type Node struct {
 	stabled  uint64
 	prevHard HardState
 
+	electionTick    int
+	heartbeatTick   int
+	rand            func(n int) int
+	randSeq         uint64
 	electionElapsed int
+	heartbeatElapse int
+	randomTimeout   int
 }
 
-// NewNode creates a follower at term 0. peers lists every member id,
-// including the node's own.
+// NewNode creates a follower at term 0 with default timing (10-tick
+// elections, 1-tick heartbeat). peers lists every member id including this
+// one.
 func NewNode(id uint64, peers []uint64) *Node {
+	return NewNodeConfig(Config{ID: id, Peers: peers})
+}
+
+func NewNodeConfig(cfg Config) *Node {
 	found := false
-	for _, p := range peers {
-		if p == id {
+	for _, p := range cfg.Peers {
+		if p == cfg.ID {
 			found = true
 		}
 	}
 	if !found {
-		panic(fmt.Sprintf("raft: node %d missing from peers %v", id, peers))
+		panic(fmt.Sprintf("raft: node %d missing from peers %v", cfg.ID, cfg.Peers))
 	}
-	return &Node{
-		id:    id,
-		peers: append([]uint64(nil), peers...),
-		log:   newLog(),
-		votes: map[uint64]bool{},
+	if cfg.ElectionTick <= 0 {
+		cfg.ElectionTick = 10
 	}
+	if cfg.HeartbeatTick <= 0 {
+		cfg.HeartbeatTick = 1
+	}
+	n := &Node{
+		id:            cfg.ID,
+		peers:         append([]uint64(nil), cfg.Peers...),
+		log:           newLog(),
+		votes:         map[uint64]bool{},
+		preVotes:      map[uint64]bool{},
+		electionTick:  cfg.ElectionTick,
+		heartbeatTick: cfg.HeartbeatTick,
+		rand:          cfg.Rand,
+	}
+	n.resetElectionTimer()
+	return n
+}
+
+// intn returns a deterministic non-negative int below hi; without an
+// injected Rand it walks a fixed splitmix sequence.
+func (n *Node) intn(hi int) int {
+	if hi <= 0 {
+		return 0
+	}
+	if n.rand != nil {
+		return n.rand(hi)
+	}
+	n.randSeq += 0x9e3779b97f4a7c15
+	z := n.randSeq
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+	z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+	z ^= z >> 31
+	return int(z % uint64(hi))
+}
+
+func (n *Node) resetElectionTimer() {
+	n.electionElapsed = 0
+	n.randomTimeout = n.electionTick + n.intn(n.electionTick)
 }
 
 func (n *Node) quorum() int { return len(n.peers)/2 + 1 }
@@ -149,7 +216,8 @@ func (n *Node) reset(term uint64) {
 	}
 	n.lead = 0
 	n.votes = map[uint64]bool{}
-	n.electionElapsed = 0
+	n.preVotes = map[uint64]bool{}
+	n.resetElectionTimer()
 }
 
 func (n *Node) becomeFollower(term, lead uint64) {
@@ -168,12 +236,24 @@ func (n *Node) becomeCandidate() {
 	n.votes[n.id] = true
 }
 
+// becomePreCandidate begins a PreVote round WITHOUT bumping the term.
+func (n *Node) becomePreCandidate() {
+	if n.role == Leader {
+		panic("raft: leader cannot pre-campaign")
+	}
+	n.role = Candidate
+	n.lead = 0
+	n.preVotes = map[uint64]bool{n.id: true}
+	n.resetElectionTimer()
+}
+
 func (n *Node) becomeLeader() {
 	if n.role != Candidate {
 		panic("raft: only a candidate can become leader")
 	}
 	n.role = Leader
 	n.lead = n.id
+	n.heartbeatElapse = 0
 	n.next = map[uint64]uint64{}
 	n.match = map[uint64]uint64{}
 	for _, p := range n.peers {
@@ -184,23 +264,43 @@ func (n *Node) becomeLeader() {
 	// way earlier-term entries may commit (the Figure 8 rule).
 	n.log.append(Entry{Index: n.log.lastIndex() + 1, Term: n.term})
 	n.maybeCommit()
+	// Assert authority immediately so followers learn the leader without
+	// waiting a heartbeat tick.
+	n.bcastHeartbeat()
 }
 
-// Campaign starts an election. Timer-driven campaigns arrive with P3.2;
-// tests and single-node bootstrap call this directly.
+// Campaign starts a PreVote round; winning it promotes to a real election.
+// Tests and single-node bootstrap call this directly; the election timeout
+// calls it from Tick.
 func (n *Node) Campaign() {
+	n.becomePreCandidate()
+	if len(n.preVotes) >= n.quorum() {
+		n.startElection()
+		return
+	}
+	// PreVote asks at term+1 without adopting it.
+	n.bcastVote(MsgPreVote, n.term+1)
+}
+
+// startElection is the real election after PreVote succeeds.
+func (n *Node) startElection() {
 	n.becomeCandidate()
 	if len(n.votes) >= n.quorum() {
 		n.becomeLeader()
 		return
 	}
+	n.bcastVote(MsgVote, n.term)
+}
+
+func (n *Node) bcastVote(t MessageType, term uint64) {
 	for _, p := range n.peers {
 		if p == n.id {
 			continue
 		}
 		n.send(Message{
-			Type:     MsgVote,
+			Type:     t,
 			To:       p,
+			Term:     term,
 			LogIndex: n.log.lastIndex(),
 			LogTerm:  n.log.lastTerm(),
 		})
@@ -215,32 +315,132 @@ func (n *Node) send(m Message) {
 	n.msgs = append(n.msgs, m)
 }
 
-// Tick advances logical time by one unit. Election and heartbeat timeouts
-// land in P3.2; the counter exists so the Ready loop shape is final.
+// Tick advances logical time. A follower or candidate that reaches its
+// randomized election timeout starts a campaign; a leader beats its
+// heartbeat (heartbeat content lands with replication in P3.4).
 func (n *Node) Tick() {
+	if n.role == Leader {
+		n.heartbeatElapse++
+		if n.heartbeatElapse >= n.heartbeatTick {
+			n.heartbeatElapse = 0
+			n.bcastHeartbeat()
+		}
+		return
+	}
 	n.electionElapsed++
+	if n.electionElapsed >= n.randomTimeout {
+		n.Campaign()
+	}
+}
+
+// bcastHeartbeat sends empty AppendEntries; P3.4 fills in per-follower
+// consistency fields.
+func (n *Node) bcastHeartbeat() {
+	for _, p := range n.peers {
+		if p == n.id {
+			continue
+		}
+		n.send(Message{Type: MsgApp, To: p, Commit: min(n.log.committed, n.match[p])})
+	}
 }
 
 // Step feeds one message into the state machine.
 func (n *Node) Step(m Message) error {
-	switch {
-	case m.Type == MsgProp:
+	if m.Type == MsgProp {
 		return n.handlePropose(m)
+	}
+	// A PreVote/PreVoteResp carries a probe term it has not adopted, so it
+	// must never drive our own term up or down; handle it before the
+	// term-comparison rules.
+	if m.Type == MsgPreVote {
+		n.handlePreVote(m)
+		return nil
+	}
+	if m.Type == MsgPreVoteResp {
+		n.handlePreVoteResp(m)
+		return nil
+	}
+
+	switch {
 	case m.Term > n.term:
-		// Any newer term makes us a follower of that term; only an
-		// actual AppendEntries identifies the leader.
 		lead := uint64(0)
 		if m.Type == MsgApp {
 			lead = m.From
 		}
 		n.becomeFollower(m.Term, lead)
 	case m.Term < n.term:
-		// Stale sender: full responses land with the vote (P3.2) and
-		// replication (P3.4) handlers; dropping is always safe.
+		// Stale sender. A stale MsgApp/MsgVote gets a rejection carrying
+		// our real term so the sender steps down; other stale messages
+		// are safe to drop.
+		if m.Type == MsgVote {
+			n.send(Message{Type: MsgVoteResp, To: m.From, Reject: true})
+		}
 		return nil
 	}
-	// Same-term dispatch arrives with P3.2 (votes) and P3.4 (append).
+
+	switch m.Type {
+	case MsgVote:
+		n.handleVote(m)
+	case MsgVoteResp:
+		n.handleVoteResp(m)
+	case MsgApp:
+		n.handleApp(m)
+	}
 	return nil
+}
+
+// handleApp handles same-term AppendEntries. P3.2 needs only the
+// leadership-recognition half — a candidate steps down, any node adopts the
+// sender as leader and resets its election timer; P3.4 adds the log
+// consistency check and replication.
+func (n *Node) handleApp(m Message) {
+	n.role = Follower
+	n.lead = m.From
+	n.resetElectionTimer()
+	n.log.commitTo(min(m.Commit, n.log.lastIndex()))
+}
+
+// handlePreVote grants a pre-vote when the probe term is ahead of ours and
+// the candidate's log is at least as up to date. Granting does not change
+// our term or vote — it only says "an election at that term could win".
+func (n *Node) handlePreVote(m Message) {
+	grant := m.Term > n.term && n.log.isUpToDate(m.LogIndex, m.LogTerm)
+	n.send(Message{Type: MsgPreVoteResp, To: m.From, Term: m.Term, Reject: !grant})
+}
+
+func (n *Node) handlePreVoteResp(m Message) {
+	if n.role != Candidate || len(n.votes) > 0 {
+		return // already promoted to a real election, or not campaigning
+	}
+	if !m.Reject {
+		n.preVotes[m.From] = true
+	}
+	if len(n.preVotes) >= n.quorum() {
+		n.startElection()
+	}
+}
+
+// handleVote grants at most one real vote per term, to an up-to-date
+// candidate.
+func (n *Node) handleVote(m Message) {
+	grant := (n.vote == 0 || n.vote == m.From) && n.log.isUpToDate(m.LogIndex, m.LogTerm)
+	if grant {
+		n.vote = m.From
+		n.resetElectionTimer()
+	}
+	n.send(Message{Type: MsgVoteResp, To: m.From, Reject: !grant})
+}
+
+func (n *Node) handleVoteResp(m Message) {
+	if n.role != Candidate {
+		return
+	}
+	if !m.Reject {
+		n.votes[m.From] = true
+	}
+	if len(n.votes) >= n.quorum() {
+		n.becomeLeader()
+	}
 }
 
 func (n *Node) handlePropose(m Message) error {

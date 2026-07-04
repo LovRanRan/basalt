@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | Phase 3 — hand-written Raft replication |
-| Next commit | P3.2 — `feat(raft): leader election with randomized timeouts, requestvote, and prevote` |
-| Commits done | 17 / 39 (P1: 11/11 · P2: 5/5 · P3: 1/11 · P4: 0/12) |
+| Next commit | P3.3 — `test(raft): deterministic network simulator with seeded partitions and message loss` |
+| Commits done | 18 / 39 (P1: 11/11 · P2: 5/5 · P3: 2/11 · P4: 0/12) |
 | Blockers | none (P1.9/P1.10 make-up review running in background) |
 | Last updated | 2026-07-04 |
 
@@ -67,13 +67,13 @@ Goal: Basalt as a real service — gRPC API, CLI client, observability, Docker +
 - [x] **P2.5** `build(release): dockerfile and end-to-end smoke test wired into ci` — multi-stage distroless image; e2e test drives the real CLI against a real server including kill + restart WAL recovery.
   *Done when: CI builds the image and the e2e job passes, incl. data surviving server kill/restart.*
 
-### Phase 3 — hand-written Raft replication (1/11)
+### Phase 3 — hand-written Raft replication (2/11)
 
 Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated state machine, linearizable reads, survives leader kills.
 
 - [x] **P3.1** `feat(raft): pure node state machine with terms, roles, and in-memory log` — deterministic transport-free `Step(msg)/Tick()` core emitting a Ready struct (etcd pattern, hand-written); all I/O outside the core.
   *Done when: a node is drivable entirely by Step/Tick in unit tests with zero goroutines/timers/sockets.*
-- [ ] **P3.2** `feat(raft): leader election with randomized timeouts, requestvote, and prevote` — Figure 2 transitions, [T, 2T) randomized timeouts from an injectable rand, vote-once-per-term with log up-to-dateness check; **PreVote so partitioned nodes don't depose healthy leaders on heal**. *(Amended per design review: Phase 4 partition suites need PreVote for non-flaky liveness.)*
+- [x] **P3.2** `feat(raft): leader election with randomized timeouts, requestvote, and prevote` — Figure 2 transitions, [T, 2T) randomized timeouts from an injectable rand, vote-once-per-term with log up-to-dateness check; **PreVote so partitioned nodes don't depose healthy leaders on heal**. *(Amended per design review: Phase 4 partition suites need PreVote for non-flaky liveness.)*
   *Done when: 3-node in-memory cluster elects exactly one leader per term across 1000 seeded runs.*
 - [ ] **P3.3** `test(raft): deterministic network simulator with seeded partitions and message loss` — virtual clock, in-memory network with drop/duplicate/reorder/delay/partition, single seeded RNG, failing seeds replay identically.
   *Done when: ElectionSafety verified over 2000+ seeds; any failing seed reproduces exactly.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P3.2** `feat(raft): leader election with randomized timeouts, requestvote, and prevote` · Full Figure-2 election: follower→(pre)candidate→leader, randomized timeouts in [T,2T) from an injectable `Rand` (default: deterministic splitmix so a config-less Node still reproduces), heartbeat tick, vote-once-per-term with the up-to-dateness check, higher-term demotion. **PreVote** landed here (moved up from the roadmap note): `Campaign` runs a term-non-bumping pre-round first, so a partitioned node cannot ratchet its term and depose a healthy leader on heal (tested: 5 isolated campaigns leave the term flat, heal restores order with no election). A minimal same-term MsgApp handler recognizes the leader (candidate steps down, timer resets) — P3.4 replaces it with real replication. Tests deterministic, zero goroutines/timers: single leader per term, two-candidate safety, prevote non-disruption, randomized-bounded timeouts, 200-seed election-safety over a 5-node cluster (never two leaders in one term).
 
 - **2026-07-04** · **P3.1** `feat(raft): pure node state machine with terms, roles, and in-memory log` · Phase 3 opens with the etcd-shaped, hand-written core: `Step(msg)/Tick()` in, `Ready{HardState, Entries, CommittedEntries, Messages}`/`Advance` out — all I/O outside the package. `raftLog` (append, term lookup, slice, `maybeAppend` with consistency check + conflicting-suffix truncation — truncating committed entries panics: leader completeness means it can never legitimately happen), universal term rules (higher term demotes + clears vote ONLY on term change), role-transition invariants (leader→candidate panics), quorum commit with the Figure 8 current-term rule, the new-leader no-op entry, and the persistence gate: **CommittedEntries never outruns the stabled prefix** — an entry is only applied after the caller persisted it (tested: propose → Ready shows the entry for persistence but not for apply until Advance). Single-node lifecycle driven purely by Step/Tick — zero goroutines, timers, or sockets. Own test-writing lesson recorded: a test that commits an entry then conflicts it violates leader completeness — the panic was right, the test was wrong. P1.9/P1.10 make-up review launched in background (session limits reset).
 
