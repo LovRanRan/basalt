@@ -151,23 +151,34 @@ func NewNode(id uint64, peers []uint64) *Node {
 }
 
 func NewNodeConfig(cfg Config) *Node {
-	return newNode(cfg, HardState{}, nil, 0)
+	return newNode(cfg, Recovered{}, 0)
 }
 
-// RestoreNode rebuilds a node from persisted state: the recovered
-// HardState, log entries (index order from 1), and the state machine's own
-// durable applied index. It resumes as a follower at the persisted term —
-// never re-voting, never regressing — and re-emits committed-but-unapplied
-// entries so the state machine can catch up.
+// Recovered is the durable state read back from Storage: the hard state,
+// the snapshot boundary the log was compacted to, and the surviving
+// entries (contiguous from SnapIndex+1).
+type Recovered struct {
+	HardState HardState
+	SnapIndex uint64
+	SnapTerm  uint64
+	Entries   []Entry
+}
+
+// RestoreNode rebuilds a node from persisted state. It resumes as a
+// follower at the persisted term — never re-voting, never regressing — and
+// re-emits committed-but-unapplied entries so the state machine catches up.
 //
-// appliedIndex must be the index the state machine has durably applied
-// through (0 if it persists nothing separately). Entries in (appliedIndex,
-// commit] are re-offered as CommittedEntries after restore.
-func RestoreNode(cfg Config, hs HardState, ents []Entry, appliedIndex uint64) *Node {
-	return newNode(cfg, hs, ents, appliedIndex)
+// appliedIndex is the index the state machine has durably applied through;
+// it must be at least rec.SnapIndex (entries below the snapshot boundary
+// are gone — compaction never passes the durable applied index, so a
+// smaller value here means the compaction rule was violated). Entries in
+// (appliedIndex, commit] are re-offered as CommittedEntries after restore.
+func RestoreNode(cfg Config, rec Recovered, appliedIndex uint64) *Node {
+	return newNode(cfg, rec, appliedIndex)
 }
 
-func newNode(cfg Config, hs HardState, ents []Entry, appliedIndex uint64) *Node {
+func newNode(cfg Config, rec Recovered, appliedIndex uint64) *Node {
+	hs, ents := rec.HardState, rec.Entries
 	found := false
 	for _, p := range cfg.Peers {
 		if p == cfg.ID {
@@ -195,6 +206,12 @@ func newNode(cfg Config, hs HardState, ents []Entry, appliedIndex uint64) *Node 
 	}
 	n.term = hs.Term
 	n.vote = hs.Vote
+	if rec.SnapIndex > 0 {
+		n.log.offset = rec.SnapIndex + 1
+		n.log.snapIndex, n.log.snapTerm = rec.SnapIndex, rec.SnapTerm
+		n.log.committed = rec.SnapIndex
+		n.log.applied = rec.SnapIndex
+	}
 	if len(ents) > 0 {
 		n.log.append(ents...)
 	}
@@ -207,6 +224,9 @@ func newNode(cfg Config, hs HardState, ents []Entry, appliedIndex uint64) *Node 
 	n.stabled = n.log.lastIndex()
 	if appliedIndex > n.log.committed {
 		panic(fmt.Sprintf("raft: applied index %d beyond commit %d", appliedIndex, n.log.committed))
+	}
+	if appliedIndex < rec.SnapIndex {
+		panic(fmt.Sprintf("raft: applied index %d below snapshot %d — compaction outran the durable state machine", appliedIndex, rec.SnapIndex))
 	}
 	n.log.applied = appliedIndex
 	n.prevHard = n.hardState()
@@ -634,6 +654,27 @@ func (n *Node) Advance(rd Ready) {
 		n.log.appliedTo(rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
 	}
 }
+
+// CompactTo folds the log prefix through index into a snapshot boundary.
+// The caller has already captured the state machine at that index (an
+// engine checkpoint) and must persist the compaction (Storage.Rewrite)
+// before or with its next sync. index must not pass the applied index.
+func (n *Node) CompactTo(index uint64) {
+	n.log.compactTo(index)
+}
+
+// SnapIndex and SnapTerm describe the log's compacted boundary.
+func (n *Node) SnapIndex() uint64 { return n.log.snapIndex }
+func (n *Node) SnapTerm() uint64  { return n.log.snapTerm }
+
+// Entries returns the live log suffix (everything after the snapshot
+// boundary); Storage.Rewrite persists exactly this alongside the boundary.
+func (n *Node) Entries() []Entry {
+	return append([]Entry(nil), n.log.slice(n.log.firstIndex(), n.log.lastIndex()+1)...)
+}
+
+// HardStateNow returns the current durable triple, for Storage.Rewrite.
+func (n *Node) HardStateNow() HardState { return n.hardState() }
 
 // Accessors for tests and upper layers.
 func (n *Node) ID() uint64        { return n.id }

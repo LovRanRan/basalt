@@ -2,16 +2,19 @@ package raft
 
 import "fmt"
 
-// raftLog is the in-memory log. entries[i] holds index offset+i; offset is
-// 1 until snapshot compaction (P3.7) moves it. Index 0 is the implicit
-// empty prefix with term 0.
+// raftLog is the in-memory log. entries[i] holds index offset+i; snapIndex
+// and snapTerm describe the compacted prefix (the last entry folded into a
+// snapshot), and offset == snapIndex+1. Index 0 is the implicit empty
+// prefix with term 0.
 //
 // committed is the highest index known safely replicated; applied is the
-// highest handed to the state machine. applied <= committed <= lastIndex
-// always; violations are logic errors and panic.
+// highest handed to the state machine. snapIndex <= applied <= committed
+// <= lastIndex always; violations are logic errors and panic.
 type raftLog struct {
 	entries   []Entry
 	offset    uint64
+	snapIndex uint64
+	snapTerm  uint64
 	committed uint64
 	applied   uint64
 }
@@ -21,6 +24,26 @@ func newLog() *raftLog {
 }
 
 func (l *raftLog) firstIndex() uint64 { return l.offset }
+
+// compactTo folds the prefix through index into a snapshot: the entries are
+// dropped and only (index, term) survives so consistency checks against the
+// boundary still work. Compaction never passes the applied index — those
+// entries could still be needed to replay a crashed state machine.
+func (l *raftLog) compactTo(index uint64) {
+	if index <= l.snapIndex {
+		return
+	}
+	if index > l.applied {
+		panic(fmt.Sprintf("raft: compact to %d beyond applied %d", index, l.applied))
+	}
+	t, ok := l.term(index)
+	if !ok {
+		panic(fmt.Sprintf("raft: compact to unknown index %d", index))
+	}
+	l.entries = append([]Entry(nil), l.entries[index-l.offset+1:]...)
+	l.offset = index + 1
+	l.snapIndex, l.snapTerm = index, t
+}
 
 func (l *raftLog) lastIndex() uint64 { return l.offset + uint64(len(l.entries)) - 1 }
 
@@ -32,10 +55,12 @@ func (l *raftLog) lastTerm() uint64 {
 	return t
 }
 
-// term returns the term of index i; ok=false when i is outside the log.
+// term returns the term of index i; ok=false when i is outside the log
+// (compacted away or past the tail). The snapshot boundary itself keeps
+// its term so AppendEntries consistency checks against it succeed.
 func (l *raftLog) term(i uint64) (uint64, bool) {
-	if i == 0 {
-		return 0, true
+	if i == l.snapIndex {
+		return l.snapTerm, true
 	}
 	if i < l.offset || i > l.lastIndex() {
 		return 0, false

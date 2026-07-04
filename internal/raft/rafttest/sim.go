@@ -80,14 +80,14 @@ func (net *Network) open(id uint64) {
 		net.Nodes[id] = raft.NewNodeConfig(net.cfg(id))
 		return
 	}
-	st, hs, ents, err := raft.OpenStorage(filepath.Join(net.dir, fmt.Sprintf("node-%d", id)))
+	st, rec, err := raft.OpenStorage(filepath.Join(net.dir, fmt.Sprintf("node-%d", id)))
 	if err != nil {
 		panic(fmt.Sprintf("rafttest: open storage %d: %v", id, err))
 	}
 	net.store[id] = st
 	// appliedBy is the durable "state machine": its length is the applied
-	// index (entries are contiguous from index 1).
-	net.Nodes[id] = raft.RestoreNode(net.cfg(id), hs, ents, uint64(len(net.appliedBy[id])))
+	// index (entries are contiguous from index 1; no compaction here).
+	net.Nodes[id] = raft.RestoreNode(net.cfg(id), rec, uint64(len(net.appliedBy[id])))
 }
 
 // Restart simulates a crash + reboot of one node: it drops the in-memory

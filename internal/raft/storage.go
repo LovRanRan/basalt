@@ -30,37 +30,40 @@ const (
 	recHardState byte = 1
 	recEntries   byte = 2
 	recTruncate  byte = 3 // drop entries with index >= payload
+	recCompact   byte = 4 // snapshot boundary: [index u64][term u64]; first record of a rewritten file
 )
 
 // OpenStorage opens or creates the state file at path and replays it into
-// hs and ents (entries in index order, starting at index 1).
-func OpenStorage(path string) (s *Storage, hs HardState, ents []Entry, err error) {
+// the recovered state: hard state, snapshot boundary, and the surviving
+// entries (contiguous from SnapIndex+1).
+func OpenStorage(path string) (*Storage, Recovered, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, HardState{}, nil, err
+		return nil, Recovered{}, err
 	}
 	buf, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, HardState{}, nil, err
+		return nil, Recovered{}, err
 	}
+	var rec Recovered
 	// Replay: a torn final record is a crash artifact and ends replay.
 	_, rerr := wal.ScanRecords(buf, func(payload []byte) error {
-		return applyRecord(payload, &hs, &ents)
+		return applyRecord(payload, &rec)
 	})
 	if rerr != nil {
-		return nil, HardState{}, nil, rerr
+		return nil, Recovered{}, rerr
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return nil, HardState{}, nil, err
+		return nil, Recovered{}, err
 	}
 	if _, err := f.Seek(0, 2); err != nil {
 		_ = f.Close()
-		return nil, HardState{}, nil, err
+		return nil, Recovered{}, err
 	}
-	return &Storage{path: path, f: f, lastIndex: uint64(len(ents))}, hs, ents, nil
+	return &Storage{path: path, f: f, lastIndex: rec.SnapIndex + uint64(len(rec.Entries))}, rec, nil
 }
 
-func applyRecord(payload []byte, hs *HardState, ents *[]Entry) error {
+func applyRecord(payload []byte, rec *Recovered) error {
 	if len(payload) < 1 {
 		return fmt.Errorf("raft: empty storage record")
 	}
@@ -70,9 +73,19 @@ func applyRecord(payload []byte, hs *HardState, ents *[]Entry) error {
 		if len(body) != 24 {
 			return fmt.Errorf("raft: bad hardstate record")
 		}
-		hs.Term = binary.LittleEndian.Uint64(body[0:])
-		hs.Vote = binary.LittleEndian.Uint64(body[8:])
-		hs.Commit = binary.LittleEndian.Uint64(body[16:])
+		rec.HardState.Term = binary.LittleEndian.Uint64(body[0:])
+		rec.HardState.Vote = binary.LittleEndian.Uint64(body[8:])
+		rec.HardState.Commit = binary.LittleEndian.Uint64(body[16:])
+	case recCompact:
+		if len(body) != 16 {
+			return fmt.Errorf("raft: bad compact record")
+		}
+		idx := binary.LittleEndian.Uint64(body[0:])
+		if len(rec.Entries) != 0 || rec.SnapIndex != 0 {
+			return fmt.Errorf("raft: compact record not at file start")
+		}
+		rec.SnapIndex = idx
+		rec.SnapTerm = binary.LittleEndian.Uint64(body[8:])
 	case recEntries:
 		decoded, err := decodeEntries(body)
 		if err != nil {
@@ -80,17 +93,20 @@ func applyRecord(payload []byte, hs *HardState, ents *[]Entry) error {
 		}
 		for _, e := range decoded {
 			// Appends may overwrite a conflicting suffix that a later
-			// truncate would also have removed; index them directly.
-			if e.Index == 0 {
-				return fmt.Errorf("raft: zero index in storage")
+			// truncate would also have removed; index them directly,
+			// relative to the snapshot boundary.
+			if e.Index <= rec.SnapIndex {
+				return fmt.Errorf("raft: entry %d below snapshot %d", e.Index, rec.SnapIndex)
 			}
-			if int(e.Index) <= len(*ents) {
-				(*ents)[e.Index-1] = e
-				*ents = (*ents)[:e.Index]
-			} else if e.Index == uint64(len(*ents))+1 {
-				*ents = append(*ents, e)
-			} else {
-				return fmt.Errorf("raft: gap in storage at index %d (have %d)", e.Index, len(*ents))
+			pos := e.Index - rec.SnapIndex // 1-based within Entries
+			switch {
+			case pos <= uint64(len(rec.Entries)):
+				rec.Entries[pos-1] = e
+				rec.Entries = rec.Entries[:pos]
+			case pos == uint64(len(rec.Entries))+1:
+				rec.Entries = append(rec.Entries, e)
+			default:
+				return fmt.Errorf("raft: gap in storage at index %d (have through %d)", e.Index, rec.SnapIndex+uint64(len(rec.Entries)))
 			}
 		}
 	case recTruncate:
@@ -98,8 +114,11 @@ func applyRecord(payload []byte, hs *HardState, ents *[]Entry) error {
 			return fmt.Errorf("raft: bad truncate record")
 		}
 		from := binary.LittleEndian.Uint64(body)
-		if from >= 1 && int(from-1) < len(*ents) {
-			*ents = (*ents)[:from-1]
+		if from <= rec.SnapIndex {
+			return fmt.Errorf("raft: truncate %d below snapshot %d", from, rec.SnapIndex)
+		}
+		if pos := from - rec.SnapIndex; pos >= 1 && int(pos-1) < len(rec.Entries) {
+			rec.Entries = rec.Entries[:pos-1]
 		}
 	default:
 		return fmt.Errorf("raft: unknown storage record %d", payload[0])
@@ -210,6 +229,72 @@ func (s *Storage) SaveReady(rd Ready) error {
 		return s.Sync()
 	}
 	return nil
+}
+
+// Rewrite atomically replaces the whole file with a compacted image: the
+// snapshot boundary, the hard state, and the surviving entries. This is
+// how the raft log's disk footprint stays bounded — the caller invokes it
+// after capturing a state-machine snapshot and CompactTo on the node. The
+// swap is tmp-write, fsync, rename, dir-fsync; a crash at any point leaves
+// either the old or the new complete file.
+func (s *Storage) Rewrite(hs HardState, snapIndex, snapTerm uint64, ents []Entry) error {
+	tmp := s.path + ".tmp"
+	var buf []byte
+	var body [16]byte
+	binary.LittleEndian.PutUint64(body[0:], snapIndex)
+	binary.LittleEndian.PutUint64(body[8:], snapTerm)
+	buf = wal.AppendRecord(buf, append([]byte{recCompact}, body[:]...))
+	var hsb [24]byte
+	binary.LittleEndian.PutUint64(hsb[0:], hs.Term)
+	binary.LittleEndian.PutUint64(hsb[8:], hs.Vote)
+	binary.LittleEndian.PutUint64(hsb[16:], hs.Commit)
+	buf = wal.AppendRecord(buf, append([]byte{recHardState}, hsb[:]...))
+	if len(ents) > 0 {
+		buf = wal.AppendRecord(buf, append([]byte{recEntries}, encodeEntries(ents)...))
+	}
+	tf, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := tf.Write(buf); err != nil {
+		_ = tf.Close()
+		return err
+	}
+	if err := tf.Sync(); err != nil {
+		_ = tf.Close()
+		return err
+	}
+	if err := tf.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+	if err := syncParentDir(s.path); err != nil {
+		return err
+	}
+	// Swap the append handle to the new file.
+	old := s.f
+	f, err := os.OpenFile(s.path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	_ = old.Close()
+	s.f = f
+	s.lastIndex = snapIndex + uint64(len(ents))
+	return nil
+}
+
+func syncParentDir(path string) error {
+	d, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // Sync makes every appended record durable. It must be called before any

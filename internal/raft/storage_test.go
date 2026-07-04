@@ -8,24 +8,30 @@ import (
 
 func reopen(t *testing.T, path string) (HardState, []Entry) {
 	t.Helper()
-	s, hs, ents, err := OpenStorage(path)
+	rec := reopenRec(t, path)
+	return rec.HardState, rec.Entries
+}
+
+func reopenRec(t *testing.T, path string) Recovered {
+	t.Helper()
+	s, rec, err := OpenStorage(path)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	return hs, ents
+	return rec
 }
 
 func TestStorageRoundtrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "raft", "state")
-	s, hs, ents, err := OpenStorage(path)
+	s, rec0, err := OpenStorage(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hs != (HardState{}) || len(ents) != 0 {
-		t.Fatalf("fresh storage: hs=%+v ents=%d", hs, len(ents))
+	if rec0.HardState != (HardState{}) || len(rec0.Entries) != 0 || rec0.SnapIndex != 0 {
+		t.Fatalf("fresh storage: %+v", rec0)
 	}
 	if err := s.SaveHardState(HardState{Term: 3, Vote: 2, Commit: 0}); err != nil {
 		t.Fatal(err)
@@ -40,7 +46,7 @@ func TestStorageRoundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hs, ents = reopen(t, path)
+	hs, ents := reopen(t, path)
 	if hs.Term != 3 || hs.Vote != 2 || hs.Commit != 2 {
 		t.Fatalf("recovered hs = %+v", hs)
 	}
@@ -51,7 +57,7 @@ func TestStorageRoundtrip(t *testing.T) {
 
 func TestStorageTruncateSuffix(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state")
-	s, _, _, err := OpenStorage(path)
+	s, _, err := OpenStorage(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +86,7 @@ func TestStorageTruncateSuffix(t *testing.T) {
 
 func TestStorageTornTailRecovery(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state")
-	s, _, _, err := OpenStorage(path)
+	s, _, err := OpenStorage(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +128,7 @@ func TestRestoreNodeResumesWithoutRevoting(t *testing.T) {
 	// A node that voted in term 5 must, after restart, still refuse a
 	// second vote in term 5.
 	cfg := Config{ID: 1, Peers: []uint64{1, 2, 3}}
-	n := RestoreNode(cfg, HardState{Term: 5, Vote: 2, Commit: 0}, []Entry{ent(1, 5, "x")}, 0)
+	n := RestoreNode(cfg, Recovered{HardState: HardState{Term: 5, Vote: 2}, Entries: []Entry{ent(1, 5, "x")}}, 0)
 	if n.Term() != 5 || n.Role() != Follower {
 		t.Fatalf("restored role=%v term=%d", n.Role(), n.Term())
 	}
@@ -153,11 +159,11 @@ func TestPersistThenRestoreDrivesReadyLoop(t *testing.T) {
 	// storage, and confirm the committed commands survived.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state")
-	st, hs, ents, err := OpenStorage(path)
+	st, rec, err := OpenStorage(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := RestoreNode(Config{ID: 1, Peers: []uint64{1}}, hs, ents, 0)
+	n := RestoreNode(Config{ID: 1, Peers: []uint64{1}}, rec, 0)
 	n.Campaign()
 	if err := n.Propose([]byte("one")); err != nil {
 		t.Fatal(err)

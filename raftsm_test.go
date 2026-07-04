@@ -53,7 +53,7 @@ func openReplica(t *testing.T, dir string, id uint64, ids []uint64) *replica {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, hs, ents, err := raft.OpenStorage(filepath.Join(dir, "raft", "state"))
+	st, rec, err := raft.OpenStorage(filepath.Join(dir, "raft", "state"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func openReplica(t *testing.T, dir string, id uint64, ids []uint64) *replica {
 	node := raft.RestoreNode(raft.Config{
 		ID: id, Peers: ids, ElectionTick: 10,
 		Rand: func(hi int) int { return int(rng() % uint64(hi)) },
-	}, hs, ents, sm.AppliedIndex())
+	}, rec, sm.AppliedIndex())
 	return &replica{id: id, node: node, st: st, db: db, sm: sm, dir: dir}
 }
 

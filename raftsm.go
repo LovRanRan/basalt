@@ -98,6 +98,35 @@ func NewStateMachine(db *DB) (*StateMachine, error) {
 // through — the value RestoreNode needs.
 func (sm *StateMachine) AppliedIndex() uint64 { return sm.applied }
 
+// Snapshot captures the state machine at its current applied index as an
+// engine checkpoint at dst, returning the raft (index, term) the snapshot
+// covers. Checkpoint drains and flushes first, so after this returns the
+// LIVE engine's durable state also covers the returned index — which is
+// what makes it safe to compact the raft log to it: a crash right after
+// compaction still recovers an engine at or beyond the snapshot boundary.
+func (sm *StateMachine) Snapshot(dst string) (index, term uint64, err error) {
+	if err := sm.db.Checkpoint(dst); err != nil {
+		return 0, 0, err
+	}
+	return sm.applied, sm.term, nil
+}
+
+// ReadSnapshotMeta opens a snapshot directory (a checkpoint) read-only and
+// returns the raft index/term it covers — what an InstallSnapshot receiver
+// (P3.8) verifies before swapping it in.
+func ReadSnapshotMeta(dir string) (index, term uint64, err error) {
+	db, err := Open(dir, Options{DisableWAL: true})
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = db.Close() }()
+	sm, err := NewStateMachine(db)
+	if err != nil {
+		return 0, 0, err
+	}
+	return sm.applied, sm.term, nil
+}
+
 // AppliedTerm returns the term of the applied entry (snapshot metadata for
 // P3.7).
 func (sm *StateMachine) AppliedTerm() uint64 { return sm.term }
