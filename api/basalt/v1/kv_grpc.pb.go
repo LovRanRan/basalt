@@ -355,3 +355,187 @@ var RaftService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "basalt/v1/kv.proto",
 }
+
+const (
+	ShardService_UpdateShardMap_FullMethodName = "/basalt.v1.ShardService/UpdateShardMap"
+	ShardService_GetShardMap_FullMethodName    = "/basalt.v1.ShardService/GetShardMap"
+	ShardService_AddGroup_FullMethodName       = "/basalt.v1.ShardService/AddGroup"
+)
+
+// ShardServiceClient is the client API for ShardService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// ShardService distributes the versioned shard map and bootstraps groups at
+// runtime.
+type ShardServiceClient interface {
+	UpdateShardMap(ctx context.Context, in *UpdateShardMapRequest, opts ...grpc.CallOption) (*UpdateShardMapResponse, error)
+	GetShardMap(ctx context.Context, in *GetShardMapRequest, opts ...grpc.CallOption) (*GetShardMapResponse, error)
+	AddGroup(ctx context.Context, in *AddGroupRequest, opts ...grpc.CallOption) (*AddGroupResponse, error)
+}
+
+type shardServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewShardServiceClient(cc grpc.ClientConnInterface) ShardServiceClient {
+	return &shardServiceClient{cc}
+}
+
+func (c *shardServiceClient) UpdateShardMap(ctx context.Context, in *UpdateShardMapRequest, opts ...grpc.CallOption) (*UpdateShardMapResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateShardMapResponse)
+	err := c.cc.Invoke(ctx, ShardService_UpdateShardMap_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *shardServiceClient) GetShardMap(ctx context.Context, in *GetShardMapRequest, opts ...grpc.CallOption) (*GetShardMapResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetShardMapResponse)
+	err := c.cc.Invoke(ctx, ShardService_GetShardMap_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *shardServiceClient) AddGroup(ctx context.Context, in *AddGroupRequest, opts ...grpc.CallOption) (*AddGroupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddGroupResponse)
+	err := c.cc.Invoke(ctx, ShardService_AddGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ShardServiceServer is the server API for ShardService service.
+// All implementations must embed UnimplementedShardServiceServer
+// for forward compatibility.
+//
+// ShardService distributes the versioned shard map and bootstraps groups at
+// runtime.
+type ShardServiceServer interface {
+	UpdateShardMap(context.Context, *UpdateShardMapRequest) (*UpdateShardMapResponse, error)
+	GetShardMap(context.Context, *GetShardMapRequest) (*GetShardMapResponse, error)
+	AddGroup(context.Context, *AddGroupRequest) (*AddGroupResponse, error)
+	mustEmbedUnimplementedShardServiceServer()
+}
+
+// UnimplementedShardServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedShardServiceServer struct{}
+
+func (UnimplementedShardServiceServer) UpdateShardMap(context.Context, *UpdateShardMapRequest) (*UpdateShardMapResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateShardMap not implemented")
+}
+func (UnimplementedShardServiceServer) GetShardMap(context.Context, *GetShardMapRequest) (*GetShardMapResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetShardMap not implemented")
+}
+func (UnimplementedShardServiceServer) AddGroup(context.Context, *AddGroupRequest) (*AddGroupResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddGroup not implemented")
+}
+func (UnimplementedShardServiceServer) mustEmbedUnimplementedShardServiceServer() {}
+func (UnimplementedShardServiceServer) testEmbeddedByValue()                      {}
+
+// UnsafeShardServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ShardServiceServer will
+// result in compilation errors.
+type UnsafeShardServiceServer interface {
+	mustEmbedUnimplementedShardServiceServer()
+}
+
+func RegisterShardServiceServer(s grpc.ServiceRegistrar, srv ShardServiceServer) {
+	// If the following call panics, it indicates UnimplementedShardServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ShardService_ServiceDesc, srv)
+}
+
+func _ShardService_UpdateShardMap_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateShardMapRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ShardServiceServer).UpdateShardMap(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ShardService_UpdateShardMap_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ShardServiceServer).UpdateShardMap(ctx, req.(*UpdateShardMapRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ShardService_GetShardMap_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetShardMapRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ShardServiceServer).GetShardMap(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ShardService_GetShardMap_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ShardServiceServer).GetShardMap(ctx, req.(*GetShardMapRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ShardService_AddGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ShardServiceServer).AddGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ShardService_AddGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ShardServiceServer).AddGroup(ctx, req.(*AddGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ShardService_ServiceDesc is the grpc.ServiceDesc for ShardService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ShardService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "basalt.v1.ShardService",
+	HandlerType: (*ShardServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "UpdateShardMap",
+			Handler:    _ShardService_UpdateShardMap_Handler,
+		},
+		{
+			MethodName: "GetShardMap",
+			Handler:    _ShardService_GetShardMap_Handler,
+		},
+		{
+			MethodName: "AddGroup",
+			Handler:    _ShardService_AddGroup_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "basalt/v1/kv.proto",
+}

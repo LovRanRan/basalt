@@ -45,10 +45,12 @@ func (n *Node) Serve(raftLis, kvLis net.Listener) *Servers {
 // BOTH the peer (raft) server and the client server, so a node can forward a
 // client request to a peer over the same connection it uses for consensus.
 func (n *Node) ServeSharded(raftLis, kvLis net.Listener, smap *shard.ShardMap) *Servers {
-	skv := newShardKV(n, smap)
+	n.setInitialShardMap(smap)
+	skv := newShardKV(n)
 	rs := grpc.NewServer()
 	basaltv1.RegisterRaftServiceServer(rs, &raftServer{n: n})
 	basaltv1.RegisterKVServiceServer(rs, skv)
+	basaltv1.RegisterShardServiceServer(rs, &shardServer{n: n})
 	go func() { _ = rs.Serve(raftLis) }()
 
 	ks := grpc.NewServer()

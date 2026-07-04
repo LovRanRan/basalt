@@ -47,6 +47,30 @@ message RaftEntry {
 
 message StepResponse {}
 
+// ShardService distributes the versioned shard map and bootstraps groups at
+// runtime.
+service ShardService {
+  rpc UpdateShardMap(UpdateShardMapRequest) returns (UpdateShardMapResponse);
+  rpc GetShardMap(GetShardMapRequest) returns (GetShardMapResponse);
+  rpc AddGroup(AddGroupRequest) returns (AddGroupResponse);
+}
+
+message UpdateShardMapRequest {
+  bytes map = 1; // marshaled ShardMap
+}
+message UpdateShardMapResponse {
+  bool accepted = 1; // false if the node already has an equal-or-higher epoch
+  uint64 epoch = 2;  // the node's epoch after the call
+}
+message GetShardMapRequest {}
+message GetShardMapResponse {
+  bytes map = 1;
+}
+message AddGroupRequest {
+  uint64 group = 1;
+}
+message AddGroupResponse {}
+
 message GetRequest {
   bytes key = 1;
 }

@@ -6,15 +6,30 @@ import (
 	"errors"
 	"io"
 	"sort"
+	"strconv"
 	"sync/atomic"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	basalt "github.com/LovRanRan/basalt"
 	basaltv1 "github.com/LovRanRan/basalt/api/basalt/v1"
-	"github.com/LovRanRan/basalt/internal/shard"
 )
+
+// routeGIDMD is the gRPC metadata key a forwarding node stamps with the group
+// it routed a key to. The terminal node compares it against its own map: if
+// they disagree, one side's map is stale, so it rejects (retryably) rather
+// than serve a key its map assigns elsewhere. Comparing the routed slot's
+// owner — not the whole-map epoch — means an unrelated slot moving never
+// spuriously fences a key whose ownership is unchanged.
+//
+// This fences the *forwarded* hop only. A direct client call to a stale node
+// that still believes it owns a moved slot carries no header and self-routes,
+// so single-owner safety across a live slot handoff is NOT provided here — it
+// is the job of the rebalance drain (P4.7/P4.8), which stops the old owner
+// before the map flips.
+const routeGIDMD = "basalt-route-gid"
 
 // scanBatch is how many pairs one streamed ScanResponse carries.
 const scanBatch = 256
@@ -28,13 +43,43 @@ const scanBatch = 256
 type shardKV struct {
 	basaltv1.UnimplementedKVServiceServer
 	n      *Node
-	smap   *shard.ShardMap
 	client uint64
 	seq    atomic.Uint64
 }
 
-func newShardKV(n *Node, smap *shard.ShardMap) *shardKV {
-	return &shardKV{n: n, smap: smap, client: n.cfg.ID}
+func newShardKV(n *Node) *shardKV {
+	return &shardKV{n: n, client: n.cfg.ID}
+}
+
+// fenceRoute rejects a forwarded request when the forwarder and this node
+// disagree about which group owns the key — a sign one side's map is stale.
+// localGID is this node's own lookup for the key. A request without the header
+// (a direct client call) is never fenced. Returns a retryable Unavailable so
+// the client tries again once maps converge.
+func (s *shardKV) fenceRoute(ctx context.Context, localGID uint64) error {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return nil
+	}
+	vals := md.Get(routeGIDMD)
+	if len(vals) == 0 {
+		return nil
+	}
+	routed, err := strconv.ParseUint(vals[0], 10, 64)
+	if err != nil {
+		return nil
+	}
+	if routed != localGID {
+		return status.Errorf(codes.Unavailable,
+			"shard: ownership disagreement (forwarded to group %d, local map says %d)", routed, localGID)
+	}
+	return nil
+}
+
+// forwardCtx stamps the outgoing context with the group this node routed the
+// key to, so the receiving node can fence a stale hop.
+func (s *shardKV) forwardCtx(ctx context.Context, gid uint64) context.Context {
+	return metadata.AppendToOutgoingContext(ctx, routeGIDMD, strconv.FormatUint(gid, 10))
 }
 
 // leaderOf returns the node currently leading a group, or 0 if unknown.
@@ -61,15 +106,18 @@ func (s *shardKV) Put(ctx context.Context, req *basaltv1.PutRequest) (*basaltv1.
 	if err := validKey(req.GetKey()); err != nil {
 		return nil, err
 	}
-	gid := s.smap.Lookup(req.GetKey())
+	gid := s.n.ShardMap().Lookup(req.GetKey())
 	if gid == 0 {
 		return nil, status.Error(codes.FailedPrecondition, "shard: key maps to an unassigned slot")
+	}
+	if err := s.fenceRoute(ctx, gid); err != nil {
+		return nil, err
 	}
 	g := s.n.Group(gid)
 	if g == nil || s.leaderOf(gid) != s.n.cfg.ID {
 		// Not the leader of the owning group: forward to the leader node.
 		if peer, ok := s.forwardTarget(gid); ok {
-			return peer.Put(ctx, req)
+			return peer.Put(s.forwardCtx(ctx, gid), req)
 		}
 		return nil, status.Errorf(codes.Unavailable, "shard: no leader for group %d", gid)
 	}
@@ -84,14 +132,17 @@ func (s *shardKV) Delete(ctx context.Context, req *basaltv1.DeleteRequest) (*bas
 	if err := validKey(req.GetKey()); err != nil {
 		return nil, err
 	}
-	gid := s.smap.Lookup(req.GetKey())
+	gid := s.n.ShardMap().Lookup(req.GetKey())
 	if gid == 0 {
 		return nil, status.Error(codes.FailedPrecondition, "shard: key maps to an unassigned slot")
+	}
+	if err := s.fenceRoute(ctx, gid); err != nil {
+		return nil, err
 	}
 	g := s.n.Group(gid)
 	if g == nil || s.leaderOf(gid) != s.n.cfg.ID {
 		if peer, ok := s.forwardTarget(gid); ok {
-			return peer.Delete(ctx, req)
+			return peer.Delete(s.forwardCtx(ctx, gid), req)
 		}
 		return nil, status.Errorf(codes.Unavailable, "shard: no leader for group %d", gid)
 	}
@@ -105,14 +156,17 @@ func (s *shardKV) Get(ctx context.Context, req *basaltv1.GetRequest) (*basaltv1.
 	if err := validKey(req.GetKey()); err != nil {
 		return nil, err
 	}
-	gid := s.smap.Lookup(req.GetKey())
+	gid := s.n.ShardMap().Lookup(req.GetKey())
 	if gid == 0 {
 		return nil, status.Error(codes.FailedPrecondition, "shard: key maps to an unassigned slot")
+	}
+	if err := s.fenceRoute(ctx, gid); err != nil {
+		return nil, err
 	}
 	g := s.n.Group(gid)
 	if g == nil || s.leaderOf(gid) != s.n.cfg.ID {
 		if peer, ok := s.forwardTarget(gid); ok {
-			return peer.Get(ctx, req)
+			return peer.Get(s.forwardCtx(ctx, gid), req)
 		}
 		return nil, status.Errorf(codes.Unavailable, "shard: no leader for group %d", gid)
 	}
@@ -198,7 +252,7 @@ func (s *shardKV) scanGroup(req *basaltv1.ScanRequest, stream basaltv1.KVService
 func (s *shardKV) scanAllGroups(req *basaltv1.ScanRequest, stream basaltv1.KVService_ScanServer) error {
 	ctx := stream.Context()
 	var all []*basaltv1.KeyValue
-	for _, gid := range s.smap.Groups() {
+	for _, gid := range s.n.ShardMap().Groups() {
 		pairs, err := s.gatherGroup(ctx, gid, req)
 		if err != nil {
 			return err

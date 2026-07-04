@@ -18,6 +18,7 @@ import (
 func grpcServeRaft(lis net.Listener, n *Node) *grpc.Server {
 	s := grpc.NewServer()
 	basaltv1.RegisterRaftServiceServer(s, &raftServer{n: n})
+	basaltv1.RegisterShardServiceServer(s, &shardServer{n: n})
 	go func() { _ = s.Serve(lis) }()
 	return s
 }

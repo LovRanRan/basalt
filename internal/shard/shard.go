@@ -7,6 +7,7 @@
 package shard
 
 import (
+	"encoding/binary"
 	"fmt"
 	"hash/crc32"
 	"sort"
@@ -112,4 +113,35 @@ func (m *ShardMap) WithReassign(from, to uint64) *ShardMap {
 	}
 	nm.Epoch = m.Epoch + 1
 	return &nm
+}
+
+// Marshal serializes the map for distribution: epoch then one uvarint group
+// id per slot.
+func (m *ShardMap) Marshal() []byte {
+	buf := binary.LittleEndian.AppendUint64(nil, m.Epoch)
+	for _, g := range m.slots {
+		buf = binary.AppendUvarint(buf, g)
+	}
+	return buf
+}
+
+// Unmarshal parses a marshaled map.
+func Unmarshal(data []byte) (*ShardMap, error) {
+	if len(data) < 8 {
+		return nil, fmt.Errorf("shard: short map (%d bytes)", len(data))
+	}
+	m := &ShardMap{Epoch: binary.LittleEndian.Uint64(data)}
+	rest := data[8:]
+	for s := 0; s < NumSlots; s++ {
+		g, n := binary.Uvarint(rest)
+		if n <= 0 {
+			return nil, fmt.Errorf("shard: truncated slot %d", s)
+		}
+		m.slots[s] = g
+		rest = rest[n:]
+	}
+	if len(rest) != 0 {
+		return nil, fmt.Errorf("shard: %d trailing bytes", len(rest))
+	}
+	return m, nil
 }

@@ -134,3 +134,22 @@ func FuzzSlotStableAndInRange(f *testing.F) {
 		}
 	})
 }
+
+func TestMarshalRoundtrip(t *testing.T) {
+	m := NewShardMap([]uint64{7, 8, 9}).WithSlot(3, 99)
+	got, err := Unmarshal(m.Marshal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Epoch != m.Epoch {
+		t.Fatalf("epoch = %d, want %d", got.Epoch, m.Epoch)
+	}
+	for s := uint32(0); s < NumSlots; s++ {
+		if got.Group(s) != m.Group(s) {
+			t.Fatalf("slot %d = %d, want %d", s, got.Group(s), m.Group(s))
+		}
+	}
+	if _, err := Unmarshal([]byte{1, 2}); err == nil {
+		t.Fatal("short data must fail")
+	}
+}
