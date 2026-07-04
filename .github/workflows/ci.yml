@@ -32,6 +32,22 @@ jobs:
         with:
           version: v2.12
 
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -tags e2e -count=1 -v ./e2e/
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t basalt:ci .
+
   proto:
     runs-on: ubuntu-latest
     steps:
