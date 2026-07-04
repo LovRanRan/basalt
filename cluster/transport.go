@@ -48,6 +48,7 @@ type raftServer struct {
 }
 
 func (s *raftServer) Step(_ context.Context, req *basaltv1.StepRequest) (*basaltv1.StepResponse, error) {
-	s.n.stepMessage(fromProto(req.GetMessage()))
+	pm := req.GetMessage()
+	s.n.route(pm.GetGroup(), fromProto(pm))
 	return &basaltv1.StepResponse{}, nil
 }

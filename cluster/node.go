@@ -1,14 +1,14 @@
-// Package cluster runs one Basalt cluster member: a raft node driven by a
-// single event loop, an LSM engine as its state machine, a gRPC peer
-// transport for consensus messages, and the client KV service. Writes are
-// proposed through raft and acknowledged on apply; reads go through
-// ReadIndex. A request to a non-leader returns NotLeader with the current
-// leader hint so the client can redirect.
+// Package cluster runs a Basalt cluster member: one or more independent
+// raft groups per process behind a group manager, each with its own engine,
+// storage, and event loop. A single gRPC connection per peer multiplexes
+// consensus traffic for every group, tagged by group id. Writes propose
+// through a group and are acknowledged on apply; reads go through ReadIndex.
+// A request to a non-leader returns NotLeader with the leader hint so the
+// client can redirect.
 package cluster
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -43,6 +43,9 @@ type Config struct {
 	HeartbeatTick int
 	TickInterval  time.Duration // wall-clock per raft tick; default 20ms
 	SnapshotEvery uint64        // compact after this many applied entries; 0 disables
+	// Groups is the set of raft group ids this member hosts. Empty means a
+	// single group with id 1 (the degenerate one-group case).
+	Groups []uint64
 }
 
 type proposal struct {
@@ -58,36 +61,22 @@ type readReq struct {
 
 type waiterKey struct{ client, seq uint64 }
 
-// Node is a running cluster member.
+// Node is a running cluster member: a group manager hosting one or more raft
+// groups over a shared peer transport.
 type Node struct {
-	cfg  Config
-	raft *raft.Node
-	st   *raft.Storage
-	db   *basalt.DB
-	sm   *basalt.StateMachine
+	cfg     Config
+	peerIDs []uint64
 
-	recvc chan raft.Message
-	propc chan *proposal
-	readc chan *readReq
-	stopc chan struct{}
-	done  chan struct{}
+	mu     sync.RWMutex
+	groups map[uint64]*group
 
 	peers map[uint64]basaltv1.RaftServiceClient
 	conns []*grpc.ClientConn
-
-	mu       sync.Mutex
-	leader   uint64
-	term     uint64
-	role     raft.Role
-	waiters  map[waiterKey]chan error
-	reads    map[uint64]chan error
-	readSeq  uint64
-	appliedI uint64
-	snapAt   uint64
 }
 
-// Open starts a member: it recovers the engine and raft state, dials peers,
-// and launches the event loop. Serve wires it to gRPC servers.
+// Open starts a member: it dials peers, opens every configured raft group
+// (each under a group-namespaced data directory), and returns the manager.
+// Serve wires it to gRPC servers.
 func Open(cfg Config) (*Node, error) {
 	if cfg.TickInterval <= 0 {
 		cfg.TickInterval = 20 * time.Millisecond
@@ -95,46 +84,18 @@ func Open(cfg Config) (*Node, error) {
 	if cfg.ElectionTick <= 0 {
 		cfg.ElectionTick = 10
 	}
-	db, err := basalt.Open(filepath.Join(cfg.DataDir, "db"), basalt.Options{DisableWAL: true})
-	if err != nil {
-		return nil, err
+	if len(cfg.Groups) == 0 {
+		cfg.Groups = []uint64{1}
 	}
-	sm, err := basalt.NewStateMachine(db)
-	if err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	st, rec, err := raft.OpenStorage(filepath.Join(cfg.DataDir, "raft", "state"))
-	if err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	ids := make([]uint64, 0, len(cfg.Peers))
+	peerIDs := make([]uint64, 0, len(cfg.Peers))
 	for id := range cfg.Peers {
-		ids = append(ids, id)
+		peerIDs = append(peerIDs, id)
 	}
-	// Per-node RNG: without distinct seeds every node draws identical
-	// election timeouts and splits the vote forever.
-	rng := splitmix(cfg.ID*0x9e3779b97f4a7c15 + 1)
-	rn := raft.RestoreNode(raft.Config{
-		ID: cfg.ID, Peers: ids,
-		ElectionTick: cfg.ElectionTick, HeartbeatTick: cfg.HeartbeatTick,
-		Rand: func(hi int) int { return int(rng() % uint64(hi)) },
-	}, rec, sm.AppliedIndex())
-
 	n := &Node{
-		cfg: cfg, raft: rn, st: st, db: db, sm: sm,
-		recvc:   make(chan raft.Message, 256),
-		propc:   make(chan *proposal),
-		readc:   make(chan *readReq),
-		stopc:   make(chan struct{}),
-		done:    make(chan struct{}),
-		peers:   map[uint64]basaltv1.RaftServiceClient{},
-		waiters: map[waiterKey]chan error{},
-		reads:   map[uint64]chan error{},
+		cfg: cfg, peerIDs: peerIDs,
+		groups: map[uint64]*group{},
+		peers:  map[uint64]basaltv1.RaftServiceClient{},
 	}
-	n.appliedI = sm.AppliedIndex()
-	n.snapAt = n.appliedI
 	for id, addr := range cfg.Peers {
 		if id == cfg.ID {
 			continue
@@ -142,27 +103,97 @@ func Open(cfg Config) (*Node, error) {
 		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			n.closeConns()
-			_ = st.Close()
-			_ = db.Close()
 			return nil, err
 		}
 		n.conns = append(n.conns, conn)
 		n.peers[id] = basaltv1.NewRaftServiceClient(conn)
 	}
-	go n.run()
+	for _, gid := range cfg.Groups {
+		g, err := openGroup(gid, cfg.ID, peerIDs, n.groupDir(gid),
+			cfg.ElectionTick, cfg.HeartbeatTick, cfg.TickInterval, cfg.SnapshotEvery, n.sendTo)
+		if err != nil {
+			n.closeGroups()
+			n.closeConns()
+			return nil, err
+		}
+		n.groups[gid] = g
+	}
 	return n, nil
 }
 
-func splitmix(seed uint64) func() uint64 {
-	s := seed
-	return func() uint64 {
-		s += 0x9e3779b97f4a7c15
-		z := s
-		z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
-		z = (z ^ (z >> 27)) * 0x94d049bb133111eb
-		return z ^ (z >> 31)
+// groupDir namespaces a group's on-disk state so groups never collide.
+func (n *Node) groupDir(gid uint64) string {
+	return filepath.Join(n.cfg.DataDir, fmt.Sprintf("group-%d", gid))
+}
+
+// sendTo ships one group's raft message to its destination peer, tagged
+// with the group id, over the shared connection. Undeliverable messages are
+// dropped (raft retries).
+func (n *Node) sendTo(groupID uint64, m raft.Message) {
+	n.mu.RLock()
+	peer, ok := n.peers[m.To]
+	n.mu.RUnlock()
+	if !ok {
+		return
+	}
+	pm := toProto(m)
+	pm.Group = groupID
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, _ = peer.Step(ctx, &basaltv1.StepRequest{Message: pm})
+	}()
+}
+
+// route delivers an incoming raft message to its group.
+func (n *Node) route(groupID uint64, m raft.Message) {
+	n.mu.RLock()
+	g := n.groups[groupID]
+	n.mu.RUnlock()
+	if g != nil {
+		g.step(m)
 	}
 }
+
+// Group returns the hosted group with the given id, or nil.
+func (n *Node) Group(id uint64) *group {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.groups[id]
+}
+
+// GroupIDs returns the ids of the groups this member hosts.
+func (n *Node) GroupIDs() []uint64 {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	out := make([]uint64, 0, len(n.groups))
+	for id := range n.groups {
+		out = append(out, id)
+	}
+	return out
+}
+
+// only returns the sole group when the member hosts exactly one, for the
+// degenerate single-group API.
+func (n *Node) only() *group {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	if len(n.groups) != 1 {
+		panic("cluster: single-group API used on a multi-group node")
+	}
+	for _, g := range n.groups {
+		return g
+	}
+	return nil
+}
+
+// Single-group convenience methods delegate to the sole group.
+func (n *Node) Status() (uint64, uint64, bool) { return n.only().Status() }
+func (n *Node) Propose(ctx context.Context, cmd *basalt.Command) error {
+	return n.only().Propose(ctx, cmd)
+}
+func (n *Node) ReadIndex(ctx context.Context) error { return n.only().ReadIndex(ctx) }
+func (n *Node) DB() *basalt.DB                      { return n.only().DB() }
 
 func (n *Node) closeConns() {
 	for _, c := range n.conns {
@@ -170,211 +201,24 @@ func (n *Node) closeConns() {
 	}
 }
 
-// run is the single event loop that owns the raft node.
-func (n *Node) run() {
-	defer close(n.done)
-	ticker := time.NewTicker(n.cfg.TickInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-n.stopc:
-			return
-		case <-ticker.C:
-			n.raft.Tick()
-		case m := <-n.recvc:
-			_ = n.raft.Step(m)
-		case p := <-n.propc:
-			n.handlePropose(p)
-		case r := <-n.readc:
-			n.handleRead(r)
-		}
-		n.drainReady()
+func (n *Node) closeGroups() {
+	for _, g := range n.groups {
+		_ = g.close()
 	}
 }
 
-func (n *Node) handlePropose(p *proposal) {
-	if n.raft.Role() != raft.Leader {
-		p.resp <- &ErrNotLeader{Leader: n.raft.Lead()}
-		return
-	}
-	n.waiters[p.key] = p.resp
-	if err := n.raft.Propose(p.data); err != nil {
-		delete(n.waiters, p.key)
-		p.resp <- err
-	}
-}
-
-func (n *Node) handleRead(r *readReq) {
-	if !n.raft.ReadIndex(r.id) {
-		r.resp <- &ErrNotLeader{Leader: n.raft.Lead()}
-		return
-	}
-	n.reads[r.id] = r.resp
-}
-
-func (n *Node) drainReady() {
-	for n.raft.HasReady() {
-		rd := n.raft.Ready()
-		if err := n.st.SaveReady(rd); err != nil {
-			n.fail(err)
-			return
-		}
-		applied, err := n.sm.Apply(rd.CommittedEntries)
-		if err != nil {
-			n.fail(err)
-			return
-		}
-		for _, a := range applied {
-			if ch, ok := n.waiters[waiterKey{a.ClientID, a.Seq}]; ok {
-				delete(n.waiters, waiterKey{a.ClientID, a.Seq})
-				ch <- nil
-			}
-		}
-		if len(rd.CommittedEntries) > 0 {
-			n.appliedI = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
-		}
-		for _, rs := range rd.ReadStates {
-			if ch, ok := n.reads[rs.ID]; ok {
-				delete(n.reads, rs.ID)
-				ch <- nil
-			}
-		}
-		n.send(rd.Messages)
-		n.publishStatus()
-		n.raft.Advance(rd)
-		n.maybeSnapshot()
-	}
-}
-
-// publishStatus snapshots leader/term/role for concurrent readers of Status.
-func (n *Node) publishStatus() {
-	n.mu.Lock()
-	n.leader, n.term, n.role = n.raft.Lead(), n.raft.Term(), n.raft.Role()
-	n.mu.Unlock()
-}
-
-// maybeSnapshot compacts the raft log once enough entries have applied.
-func (n *Node) maybeSnapshot() {
-	if n.cfg.SnapshotEvery == 0 || n.appliedI < n.snapAt+n.cfg.SnapshotEvery {
-		return
-	}
-	dst := filepath.Join(n.cfg.DataDir, fmt.Sprintf("snap-%d", n.appliedI))
-	index, term, err := n.sm.Snapshot(dst)
-	if err != nil {
-		n.fail(err)
-		return
-	}
-	n.raft.CompactTo(index)
-	if err := n.st.Rewrite(n.raft.HardStateNow(), n.raft.SnapIndex(), n.raft.SnapTerm(), n.raft.Entries()); err != nil {
-		n.fail(err)
-		return
-	}
-	n.snapAt = index
-	_ = term
-}
-
-// send ships raft messages to peers, dropping any this loop cannot deliver
-// (raft retries). MsgSnap is not yet wired to a real transfer here; a
-// follower that far behind waits for a future InstallSnapshot RPC.
-func (n *Node) send(msgs []raft.Message) {
-	for _, m := range msgs {
-		if m.Type == raft.MsgSnap {
-			continue // out-of-band transfer not wired into the RPC path yet
-		}
-		peer, ok := n.peers[m.To]
-		if !ok {
-			continue
-		}
-		go func(peer basaltv1.RaftServiceClient, m raft.Message) {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_, _ = peer.Step(ctx, &basaltv1.StepRequest{Message: toProto(m)})
-		}(peer, m)
-	}
-}
-
-func (n *Node) fail(err error) {
-	// A background failure poisons the loop; callers surface it as
-	// Unavailable. Log via panic in tests; production would use slog.
-	panic(fmt.Sprintf("cluster: node %d: %v", n.cfg.ID, err))
-}
-
-// Status reports the node's view of leadership.
-func (n *Node) Status() (leader uint64, term uint64, isLeader bool) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.leader, n.term, n.role == raft.Leader
-}
-
-// stepMessage feeds an incoming raft message into the loop.
-func (n *Node) stepMessage(m raft.Message) {
-	select {
-	case n.recvc <- m:
-	case <-n.stopc:
-	}
-}
-
-// Propose submits a command and waits for it to apply (or fail). ctx bounds
-// the wait.
-func (n *Node) Propose(ctx context.Context, cmd *basalt.Command) error {
-	p := &proposal{data: basalt.EncodeCommand(cmd), key: waiterKey{cmd.ClientID, cmd.Seq}, resp: make(chan error, 1)}
-	select {
-	case n.propc <- p:
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-n.stopc:
-		return errors.New("cluster: node stopped")
-	}
-	select {
-	case err := <-p.resp:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-n.stopc:
-		return errors.New("cluster: node stopped")
-	}
-}
-
-// ReadIndex confirms a linearizable read; on success the caller may read
-// the engine.
-func (n *Node) ReadIndex(ctx context.Context) error {
-	n.mu.Lock()
-	n.readSeq++
-	id := n.readSeq
-	n.mu.Unlock()
-	r := &readReq{id: id, resp: make(chan error, 1)}
-	select {
-	case n.readc <- r:
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-n.stopc:
-		return errors.New("cluster: node stopped")
-	}
-	select {
-	case err := <-r.resp:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-n.stopc:
-		return errors.New("cluster: node stopped")
-	}
-}
-
-// DB exposes the engine for local reads after a confirmed ReadIndex.
-func (n *Node) DB() *basalt.DB { return n.db }
-
-// Close stops the loop and releases resources.
+// Close stops every group and releases the shared transport.
 func (n *Node) Close() error {
-	select {
-	case <-n.stopc:
-	default:
-		close(n.stopc)
+	var err error
+	n.mu.Lock()
+	groups := n.groups
+	n.groups = map[uint64]*group{}
+	n.mu.Unlock()
+	for _, g := range groups {
+		if cerr := g.close(); err == nil {
+			err = cerr
+		}
 	}
-	<-n.done
 	n.closeConns()
-	err := n.st.Close()
-	if cerr := n.db.Close(); err == nil {
-		err = cerr
-	}
 	return err
 }

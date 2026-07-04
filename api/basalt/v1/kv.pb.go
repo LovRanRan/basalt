@@ -67,6 +67,7 @@ func (x *StepRequest) GetMessage() *RaftMessage {
 
 type RaftMessage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Group         uint64                 `protobuf:"varint,10,opt,name=group,proto3" json:"group,omitempty"`
 	Type          uint64                 `protobuf:"varint,1,opt,name=type,proto3" json:"type,omitempty"`
 	From          uint64                 `protobuf:"varint,2,opt,name=from,proto3" json:"from,omitempty"`
 	To            uint64                 `protobuf:"varint,3,opt,name=to,proto3" json:"to,omitempty"`
@@ -108,6 +109,13 @@ func (x *RaftMessage) ProtoReflect() protoreflect.Message {
 // Deprecated: Use RaftMessage.ProtoReflect.Descriptor instead.
 func (*RaftMessage) Descriptor() ([]byte, []int) {
 	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *RaftMessage) GetGroup() uint64 {
+	if x != nil {
+		return x.Group
+	}
+	return 0
 }
 
 func (x *RaftMessage) GetType() uint64 {
@@ -698,8 +706,10 @@ const file_basalt_v1_kv_proto_rawDesc = "" +
 	"\n" +
 	"\x12basalt/v1/kv.proto\x12\tbasalt.v1\"?\n" +
 	"\vStepRequest\x120\n" +
-	"\amessage\x18\x01 \x01(\v2\x16.basalt.v1.RaftMessageR\amessage\"\xf1\x01\n" +
-	"\vRaftMessage\x12\x12\n" +
+	"\amessage\x18\x01 \x01(\v2\x16.basalt.v1.RaftMessageR\amessage\"\x87\x02\n" +
+	"\vRaftMessage\x12\x14\n" +
+	"\x05group\x18\n" +
+	" \x01(\x04R\x05group\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\x04R\x04type\x12\x12\n" +
 	"\x04from\x18\x02 \x01(\x04R\x04from\x12\x0e\n" +
 	"\x02to\x18\x03 \x01(\x04R\x02to\x12\x12\n" +

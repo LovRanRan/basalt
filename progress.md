@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | **Phases 1-3 COMPLETE** → Phase 4 — sharding and hardening |
-| Next commit | P4.1 — `refactor(raft): host multiple raft groups per process behind a group manager` |
-| Commits done | 27 / 39 (P1: 11/11 · P2: 5/5 · P3: 11/11 · P4: 0/12) |
+| Next commit | P4.2 — `feat(shard): fixed hash-slot table mapping keys to raft groups` |
+| Commits done | 28 / 39 (P1: 11/11 · P2: 5/5 · P3: 11/11 · P4: 1/12) |
 | Blockers | none (P1.9/P1.10 make-up review complete — 2 blockers found and fixed) |
 | Last updated | 2026-07-04 |
 
@@ -94,11 +94,11 @@ Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated stat
 - [x] **P3.11** `test(raft): leader-kill smoke test and replication benchmarks` — black-box process-level leader-kill smoke test plus replicated write throughput/latency benchmarks with baseline numbers recorded. *(Trimmed per design review — the full chaos harness lives in Phase 4.)*
   *Done when: smoke test survives repeated leader kills with zero acked-write loss; `make bench-raft` emits baselines.*
 
-### Phase 4 — sharding and hardening (0/12)
+### Phase 4 — sharding and hardening (1/12)
 
 Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchmark report, docs. *(Design review: vnode ring replaced by fixed hash slots; cluster config lands before the router; shard-map distribution inserted; rebalance split in two.)*
 
-- [ ] **P4.1** `refactor(raft): host multiple raft groups per process behind a group manager` — GroupManager supervising N groups with namespaced on-disk paths; transport multiplexed by group id; single-group becomes the degenerate case.
+- [x] **P4.1** `refactor(raft): host multiple raft groups per process behind a group manager` — GroupManager supervising N groups with namespaced on-disk paths; transport multiplexed by group id; single-group becomes the degenerate case.
   *Done when: one process hosts multiple independently electing/replicating groups with the prior suite still green.*
 - [ ] **P4.2** `feat(shard): fixed hash-slot table mapping keys to raft groups` — 256 hash slots → groupID (Redis-cluster style), deterministic cross-platform hash, versioned ShardMap type; pure routing math, no I/O. *(Replaced consistent-hash vnode ring per design review: slots make ownership contiguous and per-slot migration well-defined.)*
   *Done when: Lookup is deterministic and balanced; slot reassignment provably moves only the reassigned slots' keys (unit + fuzz tests).*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P4.1** `refactor(raft): host multiple raft groups per process behind a group manager` · Phase 4 opens. Split the per-group loop into `group` (raft node + engine + storage + event loop, keyed by group id) and reworked `Node` into a group manager: it hosts N groups, each under a group-namespaced data dir (`group-<id>/db`, `group-<id>/raft`), owns ONE gRPC connection per peer, and multiplexes all groups' consensus traffic over it — outgoing messages tagged with the group id (new proto field), incoming routed to the right group by id. Single-group is the degenerate default (`Groups` empty → group 1) and `Node.Propose/ReadIndex/DB/Status` delegate to the sole group, so P2/P3 behavior and tests are unchanged. Bug avoided: each (node,group) needs its own election RNG seed or groups split votes independently. Tests race-clean: 3 groups × 3 nodes elect independent leaders and replicate with zero cross-group contamination; single-group degenerate API still works; existing client-redirect + chaos suites green on the refactored transport.
 
 - **2026-07-04** · **P3.11 fixup** `fix(cluster): per-node election RNG; single-kill smoke test` · CI (2-core shared runners) flaked on the cluster tests, and the root cause was a real bug, not just timing: `cluster.Open` never set `raft.Config.Rand`, so all three nodes drew the SAME default deterministic election-timeout sequence → identical timeouts → perpetual split votes → occasional election failure (same trap the test harness hit earlier). Fixed with a per-node splitmix seed. Also relaxed the client tests' op counts/timeouts for slow runners and trimmed the chaos smoke test to a single leader kill (the design-review scope; repeated kill+reboot is covered by the deterministic simulator's crash chaos, which doesn't depend on real-network gRPC reconnection timing). 12/12 chaos + 8/8 race-suite cluster runs stable locally after the RNG fix.
 
