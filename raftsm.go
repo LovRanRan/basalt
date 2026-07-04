@@ -156,7 +156,9 @@ func (sm *StateMachine) Apply(entries []raft.Entry) ([]Applied, error) {
 		var cmdClient, cmdSeq uint64
 		haveCmd := false
 		haveSess := false
-		if e.Data != nil {
+		// Configuration-change entries mutate raft membership, not the
+		// engine: advance the applied index but decode no command.
+		if e.Data != nil && e.Type != raft.EntryConfChange {
 			cmd, err := DecodeCommand(e.Data)
 			if err != nil {
 				return nil, fmt.Errorf("basalt: entry %d: %w", e.Index, err)

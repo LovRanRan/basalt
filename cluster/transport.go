@@ -19,7 +19,7 @@ func toProto(m raft.Message) *basaltv1.RaftMessage {
 		Reject:   m.Reject,
 	}
 	for _, e := range m.Entries {
-		pm.Entries = append(pm.Entries, &basaltv1.RaftEntry{Index: e.Index, Term: e.Term, Data: e.Data})
+		pm.Entries = append(pm.Entries, &basaltv1.RaftEntry{Index: e.Index, Term: e.Term, Data: e.Data, Type: uint64(e.Type)})
 	}
 	return pm
 }
@@ -36,7 +36,7 @@ func fromProto(pm *basaltv1.RaftMessage) raft.Message {
 		Reject:   pm.GetReject(),
 	}
 	for _, e := range pm.GetEntries() {
-		m.Entries = append(m.Entries, raft.Entry{Index: e.GetIndex(), Term: e.GetTerm(), Data: e.GetData()})
+		m.Entries = append(m.Entries, raft.Entry{Type: raft.EntryType(e.GetType()), Index: e.GetIndex(), Term: e.GetTerm(), Data: e.GetData()})
 	}
 	return m
 }

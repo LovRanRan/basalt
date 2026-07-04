@@ -129,6 +129,7 @@ func applyRecord(payload []byte, rec *Recovered) error {
 func encodeEntries(ents []Entry) []byte {
 	buf := binary.LittleEndian.AppendUint32(nil, uint32(len(ents)))
 	for _, e := range ents {
+		buf = append(buf, byte(e.Type))
 		buf = binary.LittleEndian.AppendUint64(buf, e.Index)
 		buf = binary.LittleEndian.AppendUint64(buf, e.Term)
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(e.Data)))
@@ -145,15 +146,16 @@ func decodeEntries(body []byte) ([]Entry, error) {
 	body = body[4:]
 	ents := make([]Entry, 0, n)
 	for i := uint32(0); i < n; i++ {
-		if len(body) < 20 {
+		if len(body) < 21 {
 			return nil, fmt.Errorf("raft: truncated entry header")
 		}
 		e := Entry{
-			Index: binary.LittleEndian.Uint64(body[0:]),
-			Term:  binary.LittleEndian.Uint64(body[8:]),
+			Type:  EntryType(body[0]),
+			Index: binary.LittleEndian.Uint64(body[1:]),
+			Term:  binary.LittleEndian.Uint64(body[9:]),
 		}
-		dl := binary.LittleEndian.Uint32(body[16:])
-		body = body[20:]
+		dl := binary.LittleEndian.Uint32(body[17:])
+		body = body[21:]
 		if uint64(dl) > uint64(len(body)) {
 			return nil, fmt.Errorf("raft: entry data overruns record")
 		}

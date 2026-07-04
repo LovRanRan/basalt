@@ -186,6 +186,7 @@ type RaftEntry struct {
 	Index         uint64                 `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
 	Term          uint64                 `protobuf:"varint,2,opt,name=term,proto3" json:"term,omitempty"`
 	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
+	Type          uint64                 `protobuf:"varint,4,opt,name=type,proto3" json:"type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -239,6 +240,13 @@ func (x *RaftEntry) GetData() []byte {
 		return x.Data
 	}
 	return nil
+}
+
+func (x *RaftEntry) GetType() uint64 {
+	if x != nil {
+		return x.Type
+	}
+	return 0
 }
 
 type StepResponse struct {
@@ -729,11 +737,12 @@ const file_basalt_v1_kv_proto_rawDesc = "" +
 	"\blog_term\x18\x06 \x01(\x04R\alogTerm\x12\x16\n" +
 	"\x06commit\x18\a \x01(\x04R\x06commit\x12\x16\n" +
 	"\x06reject\x18\b \x01(\bR\x06reject\x12.\n" +
-	"\aentries\x18\t \x03(\v2\x14.basalt.v1.RaftEntryR\aentries\"I\n" +
+	"\aentries\x18\t \x03(\v2\x14.basalt.v1.RaftEntryR\aentries\"]\n" +
 	"\tRaftEntry\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x04R\x05index\x12\x12\n" +
 	"\x04term\x18\x02 \x01(\x04R\x04term\x12\x12\n" +
-	"\x04data\x18\x03 \x01(\fR\x04data\"\x0e\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\x12\x12\n" +
+	"\x04type\x18\x04 \x01(\x04R\x04type\"\x0e\n" +
 	"\fStepResponse\"\x1e\n" +
 	"\n" +
 	"GetRequest\x12\x10\n" +

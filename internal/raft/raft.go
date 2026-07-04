@@ -57,9 +57,21 @@ const (
 	// band and RestoreSnapshot the follower. LogIndex/LogTerm are the
 	// snapshot's last-included index/term.
 	MsgSnap
+	// MsgTimeoutNow tells a follower (the leadership-transfer target) to
+	// campaign immediately, so a leader can hand off leadership cleanly.
+	MsgTimeoutNow
+)
+
+// EntryType tags a log entry: a normal command or a configuration change.
+type EntryType uint8
+
+const (
+	EntryNormal EntryType = iota
+	EntryConfChange
 )
 
 type Entry struct {
+	Type  EntryType
 	Index uint64
 	Term  uint64
 	Data  []byte
@@ -129,6 +141,14 @@ type Node struct {
 	term uint64
 	vote uint64
 	lead uint64
+
+	// Membership: voters count toward quorum and elect; learners receive
+	// the log but neither vote nor count. peers is the derived
+	// message-target list (voters + learners).
+	voters           map[uint64]bool
+	learners         map[uint64]bool
+	pendingConfIndex uint64
+	transferee       uint64 // leadership-transfer target, 0 when none
 
 	log   *raftLog
 	votes map[uint64]bool
@@ -234,7 +254,8 @@ func newNode(cfg Config, rec Recovered, appliedIndex uint64) *Node {
 	}
 	n := &Node{
 		id:            cfg.ID,
-		peers:         append([]uint64(nil), cfg.Peers...),
+		voters:        map[uint64]bool{},
+		learners:      map[uint64]bool{},
 		log:           newLog(),
 		votes:         map[uint64]bool{},
 		preVotes:      map[uint64]bool{},
@@ -244,6 +265,10 @@ func newNode(cfg Config, rec Recovered, appliedIndex uint64) *Node {
 		readAcks:      map[uint64]bool{},
 		useLease:      cfg.LeaseRead,
 	}
+	for _, p := range cfg.Peers {
+		n.voters[p] = true
+	}
+	n.rebuildPeers()
 	n.term = hs.Term
 	n.vote = hs.Vote
 	if rec.SnapIndex > 0 {
@@ -269,6 +294,18 @@ func newNode(cfg Config, rec Recovered, appliedIndex uint64) *Node {
 		panic(fmt.Sprintf("raft: applied index %d below snapshot %d — compaction outran the durable state machine", appliedIndex, rec.SnapIndex))
 	}
 	n.log.applied = appliedIndex
+	// Rebuild membership from the recovered log's configuration entries.
+	for i := n.log.firstIndex(); i <= n.log.lastIndex(); i++ {
+		e := n.log.entries[i-n.log.offset]
+		if e.Type == EntryConfChange {
+			if cc, err := decodeConfChange(e.Data); err == nil {
+				n.applyConfChange(cc)
+				if i > n.log.applied {
+					n.pendingConfIndex = i
+				}
+			}
+		}
+	}
 	n.prevHard = n.hardState()
 	n.resetElectionTimer()
 	return n
@@ -296,7 +333,7 @@ func (n *Node) resetElectionTimer() {
 	n.randomTimeout = n.electionTick + n.intn(n.electionTick)
 }
 
-func (n *Node) quorum() int { return len(n.peers)/2 + 1 }
+func (n *Node) quorum() int { return len(n.voters)/2 + 1 }
 
 // reset moves to a new term: the vote resets only when the term actually
 // changes — re-voting within one term is the one thing Raft must never do.
@@ -347,6 +384,7 @@ func (n *Node) becomeLeader() {
 	}
 	n.role = Leader
 	n.lead = n.id
+	n.transferee = 0
 	n.heartbeatElapse = 0
 	n.leaseElapsed = 0
 	n.leaseAcks = nil
@@ -368,10 +406,34 @@ func (n *Node) becomeLeader() {
 	n.bcastHeartbeat()
 }
 
+// TransferLeader begins handing leadership to target: the leader stops
+// accepting proposals, brings the target fully up to date, and sends it
+// MsgTimeoutNow so it campaigns at once. A no-op if this node is not the
+// leader, target is unknown, or target is this node. Returns false when the
+// transfer cannot be started.
+func (n *Node) TransferLeader(target uint64) bool {
+	if n.role != Leader || target == n.id || !n.voters[target] {
+		return false
+	}
+	n.transferee = target
+	if n.match[target] >= n.log.lastIndex() {
+		// Already caught up: fire the timeout immediately.
+		n.send(Message{Type: MsgTimeoutNow, To: target})
+	} else {
+		// Push the remaining entries; the append-response handler fires
+		// MsgTimeoutNow once the target catches up.
+		n.sendAppend(target)
+	}
+	return true
+}
+
 // Campaign starts a PreVote round; winning it promotes to a real election.
 // Tests and single-node bootstrap call this directly; the election timeout
 // calls it from Tick.
 func (n *Node) Campaign() {
+	if !n.voters[n.id] {
+		return // learners do not campaign
+	}
 	n.becomePreCandidate()
 	if len(n.preVotes) >= n.quorum() {
 		n.startElection()
@@ -529,6 +591,12 @@ func (n *Node) Step(m Message) error {
 		n.handleApp(m)
 	case MsgAppResp:
 		n.handleAppResp(m)
+	case MsgTimeoutNow:
+		// The leadership-transfer target campaigns immediately, skipping
+		// PreVote to force an election against the departing leader.
+		if n.voters[n.id] {
+			n.startElection()
+		}
 	}
 	return nil
 }
@@ -587,6 +655,10 @@ func (n *Node) handleAppResp(m Message) {
 				n.confirmReadRound()
 			}
 		}
+		// A transfer target that has now caught up gets the timeout.
+		if n.transferee == m.From && n.match[m.From] >= n.log.lastIndex() {
+			n.send(Message{Type: MsgTimeoutNow, To: m.From})
+		}
 	}
 }
 
@@ -602,7 +674,7 @@ func (n *Node) handlePreVoteResp(m Message) {
 	if n.role != Candidate || len(n.votes) > 0 {
 		return // already promoted to a real election, or not campaigning
 	}
-	if !m.Reject {
+	if !m.Reject && n.voters[m.From] {
 		n.preVotes[m.From] = true
 	}
 	if len(n.preVotes) >= n.quorum() {
@@ -625,7 +697,7 @@ func (n *Node) handleVoteResp(m Message) {
 	if n.role != Candidate {
 		return
 	}
-	if !m.Reject {
+	if !m.Reject && n.voters[m.From] {
 		n.votes[m.From] = true
 	}
 	if len(n.votes) >= n.quorum() {
@@ -636,6 +708,9 @@ func (n *Node) handleVoteResp(m Message) {
 func (n *Node) handlePropose(m Message) error {
 	if n.role != Leader {
 		return ErrNotLeader
+	}
+	if n.transferee != 0 {
+		return ErrNotLeader // leadership transfer in progress; stop accepting writes
 	}
 	li := n.log.lastIndex()
 	ents := make([]Entry, len(m.Entries))
@@ -661,8 +736,8 @@ func (n *Node) maybeCommit() bool {
 		return false
 	}
 	n.match[n.id] = min(n.stabled, n.log.lastIndex())
-	matches := make([]uint64, 0, len(n.peers))
-	for _, p := range n.peers {
+	matches := make([]uint64, 0, len(n.voters))
+	for p := range n.voters {
 		matches = append(matches, n.match[p])
 	}
 	sort.Slice(matches, func(i, j int) bool { return matches[i] > matches[j] })
@@ -750,6 +825,13 @@ func (n *Node) Advance(rd Ready) {
 		n.maybeCommit() // our own persistence may complete a quorum
 	}
 	if len(rd.CommittedEntries) > 0 {
+		for _, e := range rd.CommittedEntries {
+			if e.Type == EntryConfChange {
+				if cc, err := decodeConfChange(e.Data); err == nil {
+					n.applyConfChange(cc)
+				}
+			}
+		}
 		n.log.appliedTo(rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
 	}
 	if len(rd.ReadStates) > 0 {

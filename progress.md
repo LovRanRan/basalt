@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | **Phases 1-3 COMPLETE** → Phase 4 — sharding and hardening |
-| Next commit | P4.5 — `feat(raft): leadership transfer and single-server membership changes` |
-| Commits done | 31 / 39 (P1: 11/11 · P2: 5/5 · P3: 11/11 · P4: 4/12) |
+| Next commit | P4.6 — `feat(cluster): versioned shard-map distribution with epoch fencing and dynamic group bootstrap` |
+| Commits done | 32 / 39 (P1: 11/11 · P2: 5/5 · P3: 11/11 · P4: 5/12) |
 | Blockers | none (P1.9/P1.10 make-up review complete — 2 blockers found and fixed) |
 | Last updated | 2026-07-04 |
 
@@ -94,7 +94,7 @@ Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated stat
 - [x] **P3.11** `test(raft): leader-kill smoke test and replication benchmarks` — black-box process-level leader-kill smoke test plus replicated write throughput/latency benchmarks with baseline numbers recorded. *(Trimmed per design review — the full chaos harness lives in Phase 4.)*
   *Done when: smoke test survives repeated leader kills with zero acked-write loss; `make bench-raft` emits baselines.*
 
-### Phase 4 — sharding and hardening (4/12)
+### Phase 4 — sharding and hardening (5/12)
 
 Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchmark report, docs. *(Design review: vnode ring replaced by fixed hash slots; cluster config lands before the router; shard-map distribution inserted; rebalance split in two.)*
 
@@ -106,7 +106,7 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
   *Done when: `make cluster-up` starts a 3-node/3-group cluster from one config; malformed configs rejected with actionable errors.*
 - [x] **P4.4** `feat(router): shard-aware request routing with cross-group ordered scan` — front door routes point ops to owning group preserving leader redirects; Scan scatter-gathers all groups and merge-sorts into one ordered stream; client caches the shard map.
   *Done when: all four ops succeed against any node of the multi-group cluster with correct ownership and globally ordered scans.*
-- [ ] **P4.5** `feat(raft): leadership transfer and single-server membership changes` — TimeoutNow-based leadership transfer (leader stops proposing, catches target up, transfers); single-server config changes applied on append; learners catch up before promotion; leader-only AddServer/RemoveServer RPCs. *(Leadership transfer added per design review — the remove-leader test depends on it.)*
+- [x] **P4.5** `feat(raft): leadership transfer and single-server membership changes` — TimeoutNow-based leadership transfer (leader stops proposing, catches target up, transfers); single-server config changes applied on append; learners catch up before promotion; leader-only AddServer/RemoveServer RPCs. *(Leadership transfer added per design review — the remove-leader test depends on it.)*
   *Done when: a group grows/shrinks one server at a time under load, incl. removing the leader, with no lost writes or quorum stall.*
 - [ ] **P4.6** `feat(cluster): versioned shard-map distribution with epoch fencing and dynamic group bootstrap` — push new shard-map versions to live nodes, epoch check rejects requests routed under a stale map, runtime instantiation of new raft groups on running processes. *(Inserted per design review — rebalance is unimplementable while the map is a startup-time file.)*
   *Done when: a new map version propagates to all nodes; stale-epoch requests are rejected retryably; a new group bootstraps at runtime.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P4.5** `feat(raft): leadership transfer and single-server membership changes` · **Leadership transfer** (the P4.8 dependency the design review added): `TransferLeader(target)` stops the leader accepting proposals, catches the target up, and sends `MsgTimeoutNow` so it campaigns at once (skipping PreVote to force the election); the old leader steps down on the target's higher term. **Single-server membership**: `EntryConfChange` entries carry `ConfChange{add-voter|remove|add-learner}`; the Node tracks voters vs learners (learners get the log but don't vote or count for quorum), rejects a second conf change while one is in flight (the single-server safety rule), and rebuilds membership from the log on restart. Quorum, vote-counting, and commit now use the voter set only. Two bugs the wiring caught: `MsgTimeoutNow` was added to a dispatch block that P3.9 had already removed (silently a no-op — it must be in the live switch); and `Entry.Type` was dropped over the wire (proto RaftEntry lacked a type field) so followers decoded conf-change entries as commands and panicked — added it to the proto and the storage codec, and the state machine now treats conf-change entries as applied-index no-ops. Tests race-clean at both layers: transfer + reject-to-self/non-voter/follower, add-learner→promote, one-at-a-time, restart-survival; cluster-level transfer (4/4 stable, with the correct just-elected-leader read retry) and membership round-trip.
 
 - **2026-07-04** · **P4.4** `feat(router): shard-aware request routing with cross-group ordered scan` · `shardKV` becomes a true front door — **any node serves any request**. Point ops (Put/Get/Delete): the key's slot picks its group; if this node leads that group it serves locally, else it forwards the RPC to the leader node over the shared inter-node connection (KVService now registered on the raft-address server too, so forwarding reuses the consensus link — no extra ports). Scan is scatter-gather with a `group` field on ScanRequest: a group-scoped leg scans exactly one group ReadIndex-consistently on its leader; the client-facing scan fans out to every group (locally or forwarded), merge-sorts globally (hashing destroys range locality), and applies the range + limit. `make cluster-up` smoke now hits ONE node for put/get/scan and the front door does the rest. Tests race-clean: 300 writes across rotating entry nodes + reads from other nodes all resolve; scatter-gather scan of 240 keys spread over 3 groups is complete and globally ordered, incl. a bounded+limited scan.
 

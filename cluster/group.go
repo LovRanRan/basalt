@@ -42,11 +42,12 @@ type group struct {
 	snapshotEvery uint64
 	dataDir       string
 
-	recvc chan raft.Message
-	propc chan *proposal
-	readc chan *readReq
-	stopc chan struct{}
-	done  chan struct{}
+	recvc  chan raft.Message
+	propc  chan *proposal
+	readc  chan *readReq
+	adminc chan *adminReq
+	stopc  chan struct{}
+	done   chan struct{}
 
 	mu       sync.Mutex
 	leader   uint64
@@ -91,6 +92,7 @@ func openGroup(id, localID uint64, peers []uint64, dataDir string, electionTick,
 		recvc:   make(chan raft.Message, 256),
 		propc:   make(chan *proposal),
 		readc:   make(chan *readReq),
+		adminc:  make(chan *adminReq),
 		stopc:   make(chan struct{}),
 		done:    make(chan struct{}),
 		waiters: map[waiterKey]chan error{},
@@ -118,6 +120,8 @@ func (g *group) run() {
 			g.handlePropose(p)
 		case r := <-g.readc:
 			g.handleRead(r)
+		case a := <-g.adminc:
+			a.resp <- a.fn()
 		}
 		g.drainReady()
 	}
@@ -266,6 +270,56 @@ func (g *group) ReadIndex(ctx context.Context) error {
 }
 
 func (g *group) DB() *basalt.DB { return g.db }
+
+// adminReq drives a leader-only admin op (leadership transfer or membership
+// change) on the group's event loop.
+type adminReq struct {
+	fn   func() error
+	resp chan error
+}
+
+// runAdmin submits an admin closure to the loop; run() must poll adminc.
+func (g *group) runAdmin(ctx context.Context, fn func() error) error {
+	req := &adminReq{fn: fn, resp: make(chan error, 1)}
+	select {
+	case g.adminc <- req:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-g.stopc:
+		return errors.New("cluster: group stopped")
+	}
+	select {
+	case err := <-req.resp:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-g.stopc:
+		return errors.New("cluster: group stopped")
+	}
+}
+
+// TransferLeader hands leadership to target (a voter in this group).
+func (g *group) TransferLeader(ctx context.Context, target uint64) error {
+	return g.runAdmin(ctx, func() error {
+		if !g.raft.TransferLeader(target) {
+			return &ErrNotLeader{Leader: g.raft.Lead()}
+		}
+		return nil
+	})
+}
+
+// ConfChange proposes a single-server membership change on this group.
+func (g *group) ConfChange(ctx context.Context, cc raft.ConfChange) error {
+	return g.runAdmin(ctx, func() error { return g.raft.ProposeConfChange(cc) })
+}
+
+// NumVoters returns the group's current voting-member count, read on the
+// event loop so it never races the raft node.
+func (g *group) NumVoters(ctx context.Context) (int, error) {
+	var n int
+	err := g.runAdmin(ctx, func() error { n = g.raft.NumVoters(); return nil })
+	return n, err
+}
 
 func (g *group) close() error {
 	select {
