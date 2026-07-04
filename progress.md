@@ -15,17 +15,17 @@ No work happens outside the roadmap without amending it here first.
 
 | | |
 |---|---|
-| Current phase | Phase 1 — single-node LSM storage engine |
-| Next commit | P1.11 — `bench(engine): workload harness reporting throughput and p50/p99 latency` |
-| Commits done | 10 / 39 (P1: 10/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
-| Blockers | none |
+| Current phase | **Phase 1 COMPLETE** → Phase 2 — networked single-node server |
+| Next commit | P2.1 — `feat(api): protobuf kv service definition with generated grpc stubs` |
+| Commits done | 11 / 39 (P1: 11/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
+| Blockers | none (P1.9/P1.10 external reviews were skipped due to a session usage limit — a make-up review pass is worth running before Phase 3 builds on the engine) |
 | Last updated | 2026-07-04 |
 
 ---
 
 ## Roadmap
 
-### Phase 1 — single-node LSM storage engine (10/11)
+### Phase 1 — single-node LSM storage engine (11/11 ✅)
 
 Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`, crash-safe on every path, with benchmarks.
 
@@ -49,7 +49,7 @@ Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`,
   *Done when: 200k-op churn test (1M is impractical under -race in CI; tiny memtables/thresholds force the same compaction cascades) holds level invariants + model equivalence, incl. crash-mid-compaction recovery.*
 - [x] **P1.10** `feat(engine): atomic write batch and consistent checkpoint api` — atomic multi-op `WriteBatch`; `Checkpoint()` = flush + hard-link live SSTables under a pinned Version + checkpoint manifest; `OpenFromCheckpoint` with atomic data-dir swap; stable snapshot iterator over a checkpoint. *(Inserted per design review: Raft apply, Raft snapshots, and shard rebalance all depend on these hooks. P1.2 constraint: batch ops need consecutive per-op seqnos — base..base+n-1, visibility published after the last add — because the memtable enforces internal-key uniqueness by panic.)*
   *Done when: checkpoint taken under concurrent writes reopens to a consistent point-in-time state; batch is all-or-nothing across crashes.*
-- [ ] **P1.11** `bench(engine): workload harness reporting throughput and p50/p99 latency` — db_bench-style CLI (fillseq/fillrandom/readrandom/readwhilewriting/scan), HDR histograms, engine counters exposing write amplification; go benchmarks for hot paths; reference run in README.
+- [x] **P1.11** `bench(engine): workload harness reporting throughput and p50/p99 latency` — db_bench-style CLI (fillseq/fillrandom/readrandom/readwhilewriting/scan), HDR histograms, engine counters exposing write amplification; go benchmarks for hot paths; reference run in README.
   *Done when: all workloads complete in CI smoke mode emitting throughput and p50/p99.*
 
 ### Phase 2 — networked single-node server (0/5)
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P1.11** `bench(engine): workload harness reporting throughput and p50/p99 latency` · **Phase 1 complete.** `cmd/basalt-bench`: fillseq / fillrandom / readrandom / readwhilewriting / scan with latency percentiles and engine counters (`DB.Metrics()`: flushes, compactions, bytes — write amp visible: the reference run shows 260MB flushed + 618MB compacted for ~20MB of live data under heavy overwrite churn, ~3.4x compaction amplification). Reference numbers (M-series mac, no-sync): fillrandom 290k ops/s p99=5.5µs; readrandom 596k ops/s p99=81µs; scan 5.97M keys/s. Hot paths: skiplist insert 338ns, sstable get 1.03µs, merge next 13ns. CI now runs `basalt-bench -smoke` every push. README overhauled: Phase-1 status, usage example, benchmark section with the macOS F_FULLFSYNC caveat (from the P1.3 review).
 
 - **2026-07-04** · **P1.10** `feat(engine): atomic write batch and consistent checkpoint api` · Public `Batch` (Put/Delete/Reset + `DB.Apply`): one WAL record — all-or-nothing on replay — consecutive per-op seqnos (the P1.2 constraint), single seq publication so readers never see a torn batch. `Checkpoint(dst)`: drain background work, flush the memtable, then **under mu** (excluding the collector) hard-link every live table into dst and write it a fresh manifest — a checkpoint is a complete database (plain `Open` gives the stable snapshot iterator P4.7 needs; `ReplaceWithCheckpoint` is the P3.8 install path, crash window documented). Ordering trap caught in design: the checkpoint's `manifest.Open` must run BEFORE the links — it collects unknown table files at open and would destroy them. *(External review still blocked by the session usage limit; self-review covered drain/link exclusion, the Close-during-Wait re-check, and batch buffer ownership.)* Tests race-clean: torn-batch visibility hunt under concurrent reads, batch crash atomicity with interleaved deletes, point-in-time checkpoint surviving heavy post-checkpoint churn (links outlive compaction unlinking the originals), checkpoint-during-churn prefix guarantees, replace-and-rollback.
 

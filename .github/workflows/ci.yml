@@ -18,6 +18,7 @@ jobs:
       - run: go vet ./...
       - run: test -z "$(gofmt -l .)"
       - run: go test -race -count=1 ./...
+      - run: go run ./cmd/basalt-bench -smoke
 
   lint:
     runs-on: ubuntu-latest

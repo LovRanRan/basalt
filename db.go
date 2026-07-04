@@ -112,6 +112,9 @@ type DB struct {
 	// contract requires).
 	seq atomic.Uint64
 
+	nFlushes, nCompactions      atomic.Uint64
+	flushBytes, compactionBytes atomic.Uint64
+
 	mu         sync.Mutex
 	cond       *sync.Cond
 	rs         *readState                 // current read view; swapped wholesale, never mutated
@@ -445,6 +448,8 @@ func (db *DB) flushImm() {
 	}
 	db.tables[h.num] = h
 	delete(db.pending, num)
+	db.nFlushes.Add(1)
+	db.flushBytes.Add(meta.Size)
 	if err := db.installVersionLocked(db.rs.mem, nil); err != nil {
 		db.mu.Unlock()
 		fail(err)
@@ -640,6 +645,25 @@ func (db *DB) Close() error {
 		firstErr = err
 	}
 	return firstErr
+}
+
+// Metrics is a snapshot of the engine's background-work counters; bytes
+// written by flush plus compaction against user bytes is the write
+// amplification.
+type Metrics struct {
+	Flushes         uint64
+	Compactions     uint64
+	FlushBytes      uint64
+	CompactionBytes uint64
+}
+
+func (db *DB) Metrics() Metrics {
+	return Metrics{
+		Flushes:         db.nFlushes.Load(),
+		Compactions:     db.nCompactions.Load(),
+		FlushBytes:      db.flushBytes.Load(),
+		CompactionBytes: db.compactionBytes.Load(),
+	}
 }
 
 func syncDir(dir string) error {

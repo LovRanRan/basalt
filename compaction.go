@@ -331,6 +331,10 @@ func (db *DB) compact(c *compaction) {
 			return
 		}
 	}
+	db.nCompactions.Add(1)
+	for _, meta := range outputs {
+		db.compactionBytes.Add(meta.Size)
+	}
 	clearPending()
 	// Unlink dead inputs; pinned readers keep their fds alive until they
 	// release. Pending numbers from a concurrent flush stay protected.
