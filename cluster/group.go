@@ -40,6 +40,7 @@ type group struct {
 	send          sender
 	tickInterval  time.Duration
 	snapshotEvery uint64
+	fsyncDelay    time.Duration // fault injection: stall persistence (slow disk)
 	dataDir       string
 
 	recvc  chan raft.Message
@@ -62,7 +63,7 @@ type group struct {
 
 // openGroup recovers a group's engine and raft state under dataDir (already
 // namespaced by group id) and launches its loop.
-func openGroup(id, localID uint64, peers []uint64, dataDir string, electionTick, heartbeatTick int, tick time.Duration, snapEvery uint64, snd sender) (*group, error) {
+func openGroup(id, localID uint64, peers []uint64, dataDir string, electionTick, heartbeatTick int, tick time.Duration, snapEvery uint64, fsyncDelay time.Duration, snd sender) (*group, error) {
 	db, err := basalt.Open(filepath.Join(dataDir, "db"), basalt.Options{DisableWAL: true})
 	if err != nil {
 		return nil, err
@@ -88,7 +89,7 @@ func openGroup(id, localID uint64, peers []uint64, dataDir string, electionTick,
 
 	g := &group{
 		id: id, raft: rn, st: st, db: db, sm: sm, send: snd,
-		tickInterval: tick, snapshotEvery: snapEvery, dataDir: dataDir,
+		tickInterval: tick, snapshotEvery: snapEvery, fsyncDelay: fsyncDelay, dataDir: dataDir,
 		recvc:   make(chan raft.Message, 256),
 		propc:   make(chan *proposal),
 		readc:   make(chan *readReq),
@@ -156,6 +157,13 @@ func (g *group) handleRead(r *readReq) {
 func (g *group) drainReady() {
 	for g.raft.HasReady() {
 		rd := g.raft.Ready()
+		// Injected slow disk: stall only Readies that actually persist
+		// (entries or a HardState change) — message-only Readies cost a real
+		// fsync-slow disk nothing, and stalling them would throttle the whole
+		// node instead of its disk.
+		if g.fsyncDelay > 0 && (len(rd.Entries) > 0 || rd.HardState != nil) {
+			time.Sleep(g.fsyncDelay)
+		}
 		if err := g.st.SaveReady(rd); err != nil {
 			g.fail(err)
 			return

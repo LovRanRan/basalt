@@ -48,6 +48,12 @@ type Config struct {
 	// Groups is the set of raft group ids this member hosts. Empty means a
 	// single group with id 1 (the degenerate one-group case).
 	Groups []uint64
+
+	// fsyncDelay stalls each raft persistence write (a Ready carrying
+	// entries or a HardState change) by this much — the fault-injection seam
+	// the chaos suites use to simulate a slow disk. Unexported: only
+	// in-package tests can set it.
+	fsyncDelay time.Duration
 }
 
 type proposal struct {
@@ -88,6 +94,22 @@ type Node struct {
 	// reads the freshest version. Adoption is monotonic in Epoch (SetShardMap)
 	// so a stale map can never overwrite a fresher one — the epoch fence.
 	smap atomic.Pointer[shard.ShardMap]
+
+	// raftDrop, when set, drops outgoing raft messages to peers for which it
+	// returns true — the fault-injection seam the chaos suites use to
+	// simulate network partitions. Never set in production.
+	raftDrop atomic.Pointer[func(peer uint64) bool]
+}
+
+// setRaftDrop installs (or, with nil, clears) the partition filter.
+//
+//nolint:unused // fault-injection seam used by the chaos-tagged suites
+func (n *Node) setRaftDrop(f func(peer uint64) bool) {
+	if f == nil {
+		n.raftDrop.Store(nil)
+		return
+	}
+	n.raftDrop.Store(&f)
 }
 
 // Open starts a member: it dials peers, opens every configured raft group
@@ -131,7 +153,7 @@ func Open(cfg Config) (*Node, error) {
 	}
 	for _, gid := range cfg.Groups {
 		g, err := openGroup(gid, cfg.ID, peerIDs, n.groupDir(gid),
-			cfg.ElectionTick, cfg.HeartbeatTick, cfg.TickInterval, cfg.SnapshotEvery, n.sendTo)
+			cfg.ElectionTick, cfg.HeartbeatTick, cfg.TickInterval, cfg.SnapshotEvery, cfg.fsyncDelay, n.sendTo)
 		if err != nil {
 			n.closeGroups()
 			n.closeConns()
@@ -151,6 +173,9 @@ func (n *Node) groupDir(gid uint64) string {
 // with the group id, over the shared connection. Undeliverable messages are
 // dropped (raft retries).
 func (n *Node) sendTo(groupID uint64, m raft.Message) {
+	if f := n.raftDrop.Load(); f != nil && (*f)(m.To) {
+		return // partitioned (fault injection); raft retries
+	}
 	n.mu.RLock()
 	peer, ok := n.peers[m.To]
 	n.mu.RUnlock()
@@ -243,7 +268,7 @@ func (n *Node) AddGroup(gid uint64) error {
 	}
 
 	g, err := openGroup(gid, n.cfg.ID, n.peerIDs, n.groupDir(gid),
-		n.cfg.ElectionTick, n.cfg.HeartbeatTick, n.cfg.TickInterval, n.cfg.SnapshotEvery, n.sendTo)
+		n.cfg.ElectionTick, n.cfg.HeartbeatTick, n.cfg.TickInterval, n.cfg.SnapshotEvery, n.cfg.fsyncDelay, n.sendTo)
 	if err != nil {
 		return err
 	}

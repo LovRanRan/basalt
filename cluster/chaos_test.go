@@ -58,11 +58,11 @@ func (k *killable) boot(id uint64) {
 	if err != nil {
 		k.t.Fatalf("boot %d: %v", id, err)
 	}
-	rl, err := net.Listen("tcp", k.peers[id])
+	rl, err := listenRetry(k.peers[id], 10*time.Second)
 	if err != nil {
 		k.t.Fatalf("rebind raft %d: %v", id, err)
 	}
-	kl, err := net.Listen("tcp", k.kvAddr[id])
+	kl, err := listenRetry(k.kvAddr[id], 10*time.Second)
 	if err != nil {
 		k.t.Fatalf("rebind kv %d: %v", id, err)
 	}
@@ -70,6 +70,19 @@ func (k *killable) boot(id uint64) {
 	k.nodes[id] = n
 	k.srv[id] = n.Serve(rl, kl)
 	k.mu.Unlock()
+}
+
+// listenRetry rebinds an address, retrying briefly: between kill and boot the
+// port sits free, and another process on the machine can transiently grab it.
+func listenRetry(addr string, d time.Duration) (net.Listener, error) {
+	deadline := time.Now().Add(d)
+	for {
+		l, err := net.Listen("tcp", addr)
+		if err == nil || time.Now().After(deadline) {
+			return l, err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // kill stops a node hard and frees its addresses for a later restart.
