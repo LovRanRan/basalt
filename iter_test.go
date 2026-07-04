@@ -291,8 +291,8 @@ func TestScanAfterCloseFailsCleanly(t *testing.T) {
 	if it.Valid() {
 		t.Fatal("scan on a closed db must be invalid")
 	}
-	if !errors.Is(it.Error(), errClosed) {
-		t.Fatalf("err = %v, want errClosed", it.Error())
+	if !errors.Is(it.Error(), ErrClosed) {
+		t.Fatalf("err = %v, want ErrClosed", it.Error())
 	}
 	it.Close() // must not panic
 }

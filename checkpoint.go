@@ -24,7 +24,7 @@ func (db *DB) Checkpoint(dst string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if db.closed || db.closing {
-		return errClosed
+		return ErrClosed
 	}
 	// Drain background work; holding mu afterwards excludes new flushes,
 	// compactions, and — critically — DeleteObsolete unlinking a table
@@ -60,7 +60,7 @@ func (db *DB) Checkpoint(dst string) error {
 	// Re-check after every wait: Close may have begun while mu was
 	// released inside cond.Wait or the inline flush.
 	if db.closed || db.closing {
-		return errClosed
+		return ErrClosed
 	}
 	if err := os.Mkdir(dst, 0o755); err != nil {
 		return err

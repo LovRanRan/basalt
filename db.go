@@ -26,7 +26,8 @@ var ErrNotFound = errors.New("basalt: key not found")
 // record limit. The engine stays fully usable: nothing was written.
 var ErrBatchTooLarge = errors.New("basalt: batch exceeds max WAL record size")
 
-var errClosed = errors.New("basalt: db is closed")
+// ErrClosed reports an operation on a closed database.
+var ErrClosed = errors.New("basalt: db is closed")
 
 type Options struct {
 	// MemTableSize is the write-buffer size that triggers a flush to L0.
@@ -324,7 +325,7 @@ func (db *DB) write(b *wal.Batch) error {
 	defer db.mu.Unlock()
 	switch {
 	case db.closed:
-		return errClosed
+		return ErrClosed
 	case db.bgErr != nil:
 		return db.bgErr
 	}

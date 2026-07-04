@@ -55,7 +55,7 @@ func (db *DB) acquire() (*readState, uint64, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if db.closed {
-		return nil, 0, errClosed
+		return nil, 0, ErrClosed
 	}
 	rs := db.rs
 	rs.refs.Add(1)
