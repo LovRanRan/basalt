@@ -19,6 +19,17 @@ var (
 	sessionPrefix = append(append([]byte(nil), reservedPrefix...), []byte("session/")...)
 )
 
+// NoDedupClient is the high bit of ClientID, reserved as an ephemeral
+// "no-dedup" namespace: commands whose ClientID has this bit set are always
+// applied and record no dedup session. It is for idempotent bulk writers such
+// as shard migration, where exactly-once is unnecessary (re-applying a key
+// writes the same value) and a persisted session would be harmful — an
+// ephemeral writer either collides with a stale session after its id counter
+// resets, or, if it uses a fresh id per run, leaks sessions without bound.
+// The low 63 bits still distinguish writers, so proposal waiter keys stay
+// unique. Ordinary clients use small operator-assigned ids (bit clear).
+const NoDedupClient = uint64(1) << 63
+
 // Command is one replicated client request: a batch of ops stamped with the
 // client's identity and per-client sequence number for exactly-once applies
 // across leader changes and retries.
@@ -164,7 +175,11 @@ func (sm *StateMachine) Apply(entries []raft.Entry) ([]Applied, error) {
 				return nil, fmt.Errorf("basalt: entry %d: %w", e.Index, err)
 			}
 			cmdClient, cmdSeq, haveCmd = cmd.ClientID, cmd.Seq, true
-			if cmd.Seq > sm.sessions[cmd.ClientID] {
+			switch {
+			case cmd.ClientID&NoDedupClient != 0:
+				// Ephemeral no-dedup namespace: always apply, no session.
+				eb.Ops = append(eb.Ops, cmd.Batch.inner.Ops...)
+			case cmd.Seq > sm.sessions[cmd.ClientID]:
 				eb.Ops = append(eb.Ops, cmd.Batch.inner.Ops...)
 				sk := append(append([]byte(nil), sessionPrefix...), make([]byte, 8)...)
 				binary.BigEndian.PutUint64(sk[len(sessionPrefix):], cmd.ClientID)

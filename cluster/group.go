@@ -187,9 +187,35 @@ func (g *group) drainReady() {
 }
 
 func (g *group) publishStatus() {
+	role := g.raft.Role()
+	lead := g.raft.Lead()
 	g.mu.Lock()
-	g.leader, g.term, g.role = g.raft.Lead(), g.raft.Term(), g.raft.Role()
+	g.leader, g.term, g.role = lead, g.raft.Term(), role
 	g.mu.Unlock()
+	// Stepping down strands any proposal or read waiter whose entry has not
+	// yet committed: it was appended under a term that is no longer current
+	// and may be truncated by the new leader, so it can never apply here.
+	// Fail those waiters now with a not-leader redirect instead of leaving
+	// them blocked until the caller's context expires. (A committed entry is
+	// signaled earlier in this same drainReady pass, before publishStatus, so
+	// this only reaches genuinely uncommitted waiters.)
+	if role != raft.Leader && (len(g.waiters) > 0 || len(g.reads) > 0) {
+		g.failWaiters(&ErrNotLeader{Leader: lead})
+	}
+}
+
+// failWaiters resolves every pending proposal and read waiter with err and
+// clears them. Runs on the event loop, the sole accessor of these maps; the
+// resp channels are buffered so the sends never block.
+func (g *group) failWaiters(err error) {
+	for k, ch := range g.waiters {
+		delete(g.waiters, k)
+		ch <- err
+	}
+	for id, ch := range g.reads {
+		delete(g.reads, id)
+		ch <- err
+	}
 }
 
 func (g *group) maybeSnapshot() {

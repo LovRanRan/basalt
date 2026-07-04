@@ -62,6 +62,11 @@ type Options struct {
 	// would be waste. Opening a WAL-ful directory with DisableWAL fails
 	// if undrained records remain.
 	DisableWAL bool
+	// DisableCompaction opens the engine without scheduling background
+	// compaction. For a read-only, scan-once view — a checkpoint opened
+	// briefly to stream its contents — where compacting tables that are
+	// about to be discarded is pure waste.
+	DisableCompaction bool
 }
 
 func (o *Options) defaults() {
@@ -225,9 +230,11 @@ func Open(dir string, opts Options) (*DB, error) {
 			return nil, err
 		}
 	}
-	db.mu.Lock()
-	db.maybeScheduleCompactionLocked()
-	db.mu.Unlock()
+	if !opts.DisableCompaction {
+		db.mu.Lock()
+		db.maybeScheduleCompactionLocked()
+		db.mu.Unlock()
+	}
 	ok = true
 	return db, nil
 }

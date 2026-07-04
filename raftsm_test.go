@@ -426,3 +426,59 @@ func TestReservedRangeIsInvisibleAndProtected(t *testing.T) {
 		t.Fatalf("reserved keys leaked into user scan: %v", keys)
 	}
 }
+
+func TestApplyNoDedupClient(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "db"), Options{DisableWAL: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	sm, err := NewStateMachine(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	idx := uint64(0)
+	apply := func(cmd *Command) {
+		t.Helper()
+		idx++
+		if _, err := sm.Apply([]raft.Entry{{Type: raft.EntryNormal, Index: idx, Term: 1, Data: EncodeCommand(cmd)}}); err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+	}
+	put := func(k, v string) Batch {
+		var b Batch
+		b.Put([]byte(k), []byte(v))
+		return b
+	}
+	get := func(k string) string {
+		v, err := db.Get([]byte(k))
+		if err != nil {
+			t.Fatalf("get %q: %v", k, err)
+		}
+		return string(v)
+	}
+
+	// Ordinary client: a non-increasing seq is a duplicate and is skipped.
+	apply(&Command{ClientID: 1, Seq: 1, Batch: put("a", "1")})
+	apply(&Command{ClientID: 1, Seq: 1, Batch: put("a", "2")}) // duplicate: ignored
+	if got := get("a"); got != "1" {
+		t.Fatalf("ordinary duplicate applied: a=%q, want 1", got)
+	}
+	if sm.sessions[1] != 1 {
+		t.Fatalf("ordinary client session = %d, want 1", sm.sessions[1])
+	}
+
+	// No-dedup client (high ClientID bit): the same seq applies every time and
+	// records no session — so a client-id counter reset can never collide with
+	// a persisted session, and ephemeral writers never leak sessions.
+	nd := NoDedupClient | 7
+	apply(&Command{ClientID: nd, Seq: 1, Batch: put("b", "1")})
+	apply(&Command{ClientID: nd, Seq: 1, Batch: put("b", "2")}) // same seq, still applies
+	if got := get("b"); got != "2" {
+		t.Fatalf("no-dedup client did not re-apply: b=%q, want 2", got)
+	}
+	if _, ok := sm.sessions[nd]; ok {
+		t.Fatalf("no-dedup client recorded a session: %d", sm.sessions[nd])
+	}
+}
