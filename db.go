@@ -24,6 +24,8 @@ var ErrNotFound = errors.New("basalt: key not found")
 // record limit. The engine stays fully usable: nothing was written.
 var ErrBatchTooLarge = errors.New("basalt: batch exceeds max WAL record size")
 
+var errClosed = errors.New("basalt: db is closed")
+
 type Options struct {
 	// MemTableSize is the write-buffer size that triggers a flush to L0.
 	// Defaults to 4 MiB.
@@ -65,14 +67,12 @@ type DB struct {
 
 	mu       sync.Mutex
 	cond     *sync.Cond
-	mem      *memtable.MemTable
-	imm      *memtable.MemTable
-	immSeq   uint64         // newest seq sealed into imm
-	immBound uint64         // first wal segment owned by mem (all before hold imm-or-flushed data)
-	l0       []*tableHandle // newest first; replaced wholesale, never mutated
+	rs       *readState // current read view; swapped wholesale, never mutated
+	immSeq   uint64     // newest seq sealed into imm
+	immBound uint64     // first wal segment owned by mem (all before hold imm-or-flushed data)
 	encBuf   []byte
 	bgErr    error
-	flushing bool // a flushImm goroutine may still touch vs/wal/l0
+	flushers int // live flushImm goroutines that may still touch vs/wal/rs
 	closed   bool
 	lock     *os.File // held flock; two engines on one dir destroy data
 
@@ -100,7 +100,7 @@ func Open(dir string, opts Options) (*DB, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	db := &DB{dir: dir, opts: opts, vs: vs, mem: memtable.New(), lock: lock}
+	db := &DB{dir: dir, opts: opts, vs: vs, lock: lock}
 	db.cond = sync.NewCond(&db.mu)
 
 	ok := false
@@ -110,13 +110,16 @@ func Open(dir string, opts Options) (*DB, error) {
 		}
 	}()
 
+	var l0 []*tableHandle
 	for _, meta := range vs.Current().Files[0] { // already newest-first
 		h, err := db.openTable(meta.FileNum)
 		if err != nil {
+			db.rs = newReadState(memtable.New(), nil, l0)
 			return nil, err
 		}
-		db.l0 = append(db.l0, h)
+		l0 = append(l0, h)
 	}
+	db.rs = newReadState(memtable.New(), nil, l0)
 
 	walDir := filepath.Join(dir, "wal")
 	// Segments below the manifest's log number hold only flushed data;
@@ -132,7 +135,7 @@ func Open(dir string, opts Options) (*DB, error) {
 		}
 		for i, op := range b.Ops {
 			s := b.BaseSeq + uint64(i)
-			db.mem.Add(op.UserKey, s, op.Kind, op.Value)
+			db.rs.mem.Add(op.UserKey, s, op.Kind, op.Value)
 			if s > maxSeq {
 				maxSeq = s
 			}
@@ -165,8 +168,11 @@ func acquireLock(path string) (*os.File, error) {
 }
 
 func (db *DB) releaseFiles() {
-	for _, h := range db.l0 {
-		_ = h.f.Close()
+	if db.rs != nil {
+		for _, h := range db.rs.l0 {
+			_ = h.f.Close()
+		}
+		db.rs.release()
 	}
 	if db.wal != nil {
 		_ = db.wal.Close()
@@ -213,7 +219,7 @@ func (db *DB) write(b *wal.Batch) error {
 	defer db.mu.Unlock()
 	switch {
 	case db.closed:
-		return errors.New("basalt: db is closed")
+		return errClosed
 	case db.bgErr != nil:
 		return db.bgErr
 	}
@@ -232,7 +238,7 @@ func (db *DB) write(b *wal.Batch) error {
 		return db.bgErr
 	}
 	for i, op := range b.Ops {
-		db.mem.Add(op.UserKey, b.BaseSeq+uint64(i), op.Kind, op.Value)
+		db.rs.mem.Add(op.UserKey, b.BaseSeq+uint64(i), op.Kind, op.Value)
 	}
 	db.seq.Store(prev + uint64(len(b.Ops)))
 	return nil
@@ -241,35 +247,37 @@ func (db *DB) write(b *wal.Batch) error {
 // makeRoomLocked seals the memtable once it is full, waiting for any
 // in-flight flush first, and hands the sealed table to a background flush.
 func (db *DB) makeRoomLocked() error {
-	if db.mem.ApproximateSize() < db.opts.MemTableSize {
+	if db.rs.mem.ApproximateSize() < db.opts.MemTableSize {
 		return nil
 	}
-	for db.imm != nil && db.bgErr == nil {
+	for db.rs.imm != nil && db.bgErr == nil {
 		db.cond.Wait()
 	}
 	if db.bgErr != nil {
 		return db.bgErr
 	}
-	if db.mem.ApproximateSize() < db.opts.MemTableSize {
+	if db.rs.mem.ApproximateSize() < db.opts.MemTableSize {
 		return nil // someone else made room while we waited
 	}
 	if err := db.sealLocked(); err != nil {
 		return err
 	}
-	db.flushing = true
+	db.flushers++
 	go db.flushImm()
 	return nil
 }
 
-// sealLocked freezes mem into imm and rotates the WAL so that every
+// sealLocked freezes mem into imm — installing a fresh read state so live
+// readers keep their pinned view — and rotates the WAL so that every
 // segment before the rotation holds only sealed-or-flushed data.
 func (db *DB) sealLocked() error {
 	if err := db.wal.Rotate(); err != nil {
 		db.bgErr = fmt.Errorf("basalt: wal rotate: %w", err)
 		return db.bgErr
 	}
-	db.imm = db.mem
-	db.mem = memtable.New()
+	old := db.rs
+	db.rs = newReadState(memtable.New(), old.mem, old.l0)
+	old.release()
 	db.immSeq = db.seq.Load()
 	db.immBound = db.wal.SegmentID()
 	return nil
@@ -281,7 +289,7 @@ func (db *DB) sealLocked() error {
 // recovers every acknowledged write.
 func (db *DB) flushImm() {
 	db.mu.Lock()
-	imm, sealSeq, bound := db.imm, db.immSeq, db.immBound
+	imm, sealSeq, bound := db.rs.imm, db.immSeq, db.immBound
 	num := db.vs.AllocFileNum()
 	db.mu.Unlock()
 
@@ -290,7 +298,7 @@ func (db *DB) flushImm() {
 		if db.bgErr == nil {
 			db.bgErr = fmt.Errorf("basalt: flush: %w", err)
 		}
-		db.flushing = false
+		db.flushers--
 		db.cond.Broadcast()
 		db.mu.Unlock()
 	}
@@ -322,18 +330,19 @@ func (db *DB) flushImm() {
 		fail(err)
 		return
 	}
-	l0 := make([]*tableHandle, 0, len(db.l0)+1)
+	cur := db.rs
+	l0 := make([]*tableHandle, 0, len(cur.l0)+1)
 	l0 = append(l0, h)
-	l0 = append(l0, db.l0...)
-	db.l0 = l0
-	db.imm = nil
+	l0 = append(l0, cur.l0...)
+	db.rs = newReadState(cur.mem, nil, l0)
+	cur.release()
 
 	if db.hookAfterApply != nil {
 		if err := db.hookAfterApply(); err != nil {
 			if db.bgErr == nil {
 				db.bgErr = fmt.Errorf("basalt: flush: %w", err)
 			}
-			db.flushing = false
+			db.flushers--
 			db.cond.Broadcast()
 			db.mu.Unlock()
 			return
@@ -352,7 +361,7 @@ func (db *DB) flushImm() {
 	if pruneErr != nil && db.bgErr == nil {
 		db.bgErr = fmt.Errorf("basalt: wal prune: %w", pruneErr)
 	}
-	db.flushing = false
+	db.flushers--
 	db.cond.Broadcast()
 	db.mu.Unlock()
 }
@@ -405,28 +414,26 @@ func (db *DB) writeTable(num uint64, mt *memtable.MemTable) (manifest.FileMeta, 
 
 // Get returns the newest value for key. Deleted or absent keys return
 // ErrNotFound. The returned slice is the caller's to keep.
+//
+// The point-get path and Scan share one semantics: both resolve the newest
+// version visible at the acquired sequence snapshot, layer by layer; Get
+// merely short-circuits at the first layer that knows the key.
 func (db *DB) Get(key []byte) ([]byte, error) {
-	db.mu.Lock()
-	if db.closed {
-		db.mu.Unlock()
-		return nil, errors.New("basalt: db is closed")
+	rs, seq, err := db.acquire()
+	if err != nil {
+		return nil, err
 	}
-	// Capture seq together with the structure snapshot, under mu: every
-	// write with seqno <= seq is present in the captured structures. This
-	// is exactly the invariant P1.8's read snapshots will build on.
-	mem, imm, l0 := db.mem, db.imm, db.l0
-	seq := db.seq.Load()
-	db.mu.Unlock()
+	defer rs.release()
 
-	if v, kind, ok := mem.Get(key, seq); ok {
+	if v, kind, ok := rs.mem.Get(key, seq); ok {
 		return finish(v, kind, true)
 	}
-	if imm != nil {
-		if v, kind, ok := imm.Get(key, seq); ok {
+	if rs.imm != nil {
+		if v, kind, ok := rs.imm.Get(key, seq); ok {
 			return finish(v, kind, true)
 		}
 	}
-	for _, h := range l0 {
+	for _, h := range rs.l0 {
 		v, kind, ok, err := h.r.Get(key, seq)
 		if err != nil {
 			return nil, err
@@ -462,22 +469,25 @@ func (db *DB) Close() error {
 	// Drain the flush goroutine itself, not just the imm slot: a write-path
 	// failure can poison the engine while a flush is still mid-I/O, and
 	// tearing down vs/wal/l0 under it would be a data race.
-	for db.flushing || (db.imm != nil && db.bgErr == nil) {
+	for db.flushers > 0 || (db.rs.imm != nil && db.bgErr == nil) {
 		db.cond.Wait()
 	}
-	if db.bgErr == nil && db.mem.ApproximateSize() > 0 {
+	if db.bgErr == nil && db.rs.mem.ApproximateSize() > 0 {
 		if err := db.sealLocked(); err == nil {
-			db.flushing = true
+			db.flushers++
 			db.mu.Unlock()
 			db.flushImm()
 			db.mu.Lock()
-			for db.flushing {
+			for db.flushers > 0 {
 				db.cond.Wait()
 			}
 		}
 	}
 	db.closed = true
 	firstErr := db.bgErr
+	// Drop the DB's own readState reference so the counter discipline
+	// holds on every path; P1.9 hooks file release at refs==0.
+	db.rs.release()
 	db.mu.Unlock()
 
 	if err := db.wal.Close(); err != nil && firstErr == nil {
@@ -486,7 +496,7 @@ func (db *DB) Close() error {
 	if err := db.vs.Close(); err != nil && firstErr == nil {
 		firstErr = err
 	}
-	for _, h := range db.l0 {
+	for _, h := range db.rs.l0 {
 		if err := h.f.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}

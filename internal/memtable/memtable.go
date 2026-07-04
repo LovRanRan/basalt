@@ -165,6 +165,10 @@ func (it *Iterator) SeekGE(key []byte) { it.n = it.m.findGE(key, nil) }
 func (it *Iterator) Next()       { it.n = it.n.next[0].Load() }
 func (it *Iterator) Valid() bool { return it.n != nil }
 
+// Error satisfies the engine's internal iterator interface; memtable
+// iteration cannot fail.
+func (it *Iterator) Error() error { return nil }
+
 // Key and Value are capacity-capped so appends through them cannot reach
 // node memory.
 func (it *Iterator) Key() []byte   { return it.n.key[:len(it.n.key):len(it.n.key)] }

@@ -245,7 +245,9 @@ func DeleteSegmentsBelow(dir string, upto uint64) error {
 	}
 	for _, id := range ids {
 		if id < upto {
-			if err := os.Remove(filepath.Join(dir, segmentName(id))); err != nil {
+			// Concurrent pruners (overlapping engine flushes) may race on
+			// the same dead segment; losing that race is success.
+			if err := os.Remove(filepath.Join(dir, segmentName(id))); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
 			// Sync per removal, in ascending id order, so a crash
