@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | Phase 1 — single-node LSM storage engine |
-| Next commit | P1.10 — `feat(engine): atomic write batch and consistent checkpoint api` |
-| Commits done | 9 / 39 (P1: 9/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
+| Next commit | P1.11 — `bench(engine): workload harness reporting throughput and p50/p99 latency` |
+| Commits done | 10 / 39 (P1: 10/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
 | Blockers | none |
 | Last updated | 2026-07-04 |
 
@@ -25,7 +25,7 @@ No work happens outside the roadmap without amending it here first.
 
 ## Roadmap
 
-### Phase 1 — single-node LSM storage engine (9/11)
+### Phase 1 — single-node LSM storage engine (10/11)
 
 Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`, crash-safe on every path, with benchmarks.
 
@@ -47,7 +47,7 @@ Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`,
   *Done when: differential get/scan model test passes across forced multi-table states, including mid-scan flushes.*
 - [x] **P1.9** `feat(compaction): background leveled compaction with tombstone gc and atomic manifest commits` — level scoring (L0 by file count, L1+ by ~10x byte fanout), overlap-based input picking, shadowed-entry and bottom-level tombstone dropping, atomic file-swap manifest edit; reads proceed via the P1.8 pinned versions. *(P1.4 note: add `Writer.EstimatedSize()` — offset + pending data/index blocks — for output-file splitting; a counting io.Writer lags by the pending blocks. P1.8 note: move file-close ownership into `readState.release` at refs==0 — add `tableHandle.refs`, increffed per readState and by compaction inputs; rework `DB.Close`/`releaseFiles` to release instead of closing `h.f` directly, or the release hook double-closes. `mergingIter` is reusable as-is for the all-versions compaction input; compaction lives in package basalt.)*
   *Done when: 200k-op churn test (1M is impractical under -race in CI; tiny memtables/thresholds force the same compaction cascades) holds level invariants + model equivalence, incl. crash-mid-compaction recovery.*
-- [ ] **P1.10** `feat(engine): atomic write batch and consistent checkpoint api` — atomic multi-op `WriteBatch`; `Checkpoint()` = flush + hard-link live SSTables under a pinned Version + checkpoint manifest; `OpenFromCheckpoint` with atomic data-dir swap; stable snapshot iterator over a checkpoint. *(Inserted per design review: Raft apply, Raft snapshots, and shard rebalance all depend on these hooks. P1.2 constraint: batch ops need consecutive per-op seqnos — base..base+n-1, visibility published after the last add — because the memtable enforces internal-key uniqueness by panic.)*
+- [x] **P1.10** `feat(engine): atomic write batch and consistent checkpoint api` — atomic multi-op `WriteBatch`; `Checkpoint()` = flush + hard-link live SSTables under a pinned Version + checkpoint manifest; `OpenFromCheckpoint` with atomic data-dir swap; stable snapshot iterator over a checkpoint. *(Inserted per design review: Raft apply, Raft snapshots, and shard rebalance all depend on these hooks. P1.2 constraint: batch ops need consecutive per-op seqnos — base..base+n-1, visibility published after the last add — because the memtable enforces internal-key uniqueness by panic.)*
   *Done when: checkpoint taken under concurrent writes reopens to a consistent point-in-time state; batch is all-or-nothing across crashes.*
 - [ ] **P1.11** `bench(engine): workload harness reporting throughput and p50/p99 latency` — db_bench-style CLI (fillseq/fillrandom/readrandom/readwhilewriting/scan), HDR histograms, engine counters exposing write amplification; go benchmarks for hot paths; reference run in README.
   *Done when: all workloads complete in CI smoke mode emitting throughput and p50/p99.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P1.10** `feat(engine): atomic write batch and consistent checkpoint api` · Public `Batch` (Put/Delete/Reset + `DB.Apply`): one WAL record — all-or-nothing on replay — consecutive per-op seqnos (the P1.2 constraint), single seq publication so readers never see a torn batch. `Checkpoint(dst)`: drain background work, flush the memtable, then **under mu** (excluding the collector) hard-link every live table into dst and write it a fresh manifest — a checkpoint is a complete database (plain `Open` gives the stable snapshot iterator P4.7 needs; `ReplaceWithCheckpoint` is the P3.8 install path, crash window documented). Ordering trap caught in design: the checkpoint's `manifest.Open` must run BEFORE the links — it collects unknown table files at open and would destroy them. *(External review still blocked by the session usage limit; self-review covered drain/link exclusion, the Close-during-Wait re-check, and batch buffer ownership.)* Tests race-clean: torn-batch visibility hunt under concurrent reads, batch crash atomicity with interleaved deletes, point-in-time checkpoint surviving heavy post-checkpoint churn (links outlive compaction unlinking the originals), checkpoint-during-churn prefix guarantees, replace-and-rollback.
 
 - **2026-07-04** · **P1.9** `feat(compaction): background leveled compaction with tombstone gc and atomic manifest commits` · Landed compaction.go + the file-lifetime rework: L0 scored by file count / deeper levels by bytes vs 10x budgets; L0→L1 takes all L0 + L1 overlaps, Ln→Ln+1 one rotating file + overlaps; merge keeps only the newest version per user key and **drops tombstones when no level below the output could hold the key**; outputs split at `TargetFileSize` via the new `sstable.Writer.EstimatedSize()`; one atomic manifest edit swaps inputs for outputs; cascades reschedule on completion; writes stall at `L0StopThreshold`. `tableHandle` refcounts land (files unlinked by compaction stay readable for pinned iterators until their last release); `installVersionLocked` mirrors the manifest Version into fresh readStates; Get binary-searches one candidate file per deeper level. **Real concurrency bug caught by the churn test on first run**: compaction's obsolete-file collection deleted a concurrent flush's written-but-not-yet-committed table — fixed with a `pending` set threaded into `manifest.DeleteObsolete(protect)`. *Process note: the external 3-lens review workflow died on a session usage limit; in its place I re-derived the four riskiest properties by hand — (1) `keyMayExistBelow`'s below-set is stable during a compaction (single compaction at a time; flushes only touch L0), (2) dropping shadowed versions is safe because snapshots only exist as iterator pins holding the old files, (3) the shallower-is-newer invariant survives both compaction shapes, (4) every ref/unref path pairs exactly. A make-up review can run when limits reset.* Tests race-clean: 200k-op churn (model equivalence at every 25k, level invariants, reopen), crash before/after compaction Apply, tombstone GC verified physically absent from every table, pinned iterator survives compaction unlinking its files.
 
