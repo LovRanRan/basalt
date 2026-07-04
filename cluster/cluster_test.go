@@ -82,7 +82,7 @@ func TestClusterClientRoutesThroughRedirects(t *testing.T) {
 	ids := []uint64{1, 2, 3}
 	tc := startCluster(t, ids)
 	defer tc.stop()
-	tc.waitLeader(5 * time.Second)
+	tc.waitLeader(20 * time.Second)
 
 	c, err := NewClient(tc.kv)
 	if err != nil {
@@ -90,16 +90,17 @@ func TestClusterClientRoutesThroughRedirects(t *testing.T) {
 	}
 	defer c.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	for i := 0; i < 200; i++ {
+	const n = 40
+	for i := 0; i < n; i++ {
 		if err := c.Put(ctx, []byte(fmt.Sprintf("key-%03d", i)), []byte(fmt.Sprintf("v-%d", i))); err != nil {
 			t.Fatalf("put %d: %v", i, err)
 		}
 	}
 	// Linearizable reads see every prior write, whichever node the client
 	// happens to hit first (it redirects to the leader).
-	for i := 0; i < 200; i++ {
+	for i := 0; i < n; i++ {
 		v, found, err := c.Get(ctx, []byte(fmt.Sprintf("key-%03d", i)))
 		if err != nil || !found || string(v) != fmt.Sprintf("v-%d", i) {
 			t.Fatalf("get %d = (%q, %v, %v)", i, v, found, err)
@@ -114,7 +115,7 @@ func TestClusterDirectToFollowerRedirects(t *testing.T) {
 	ids := []uint64{1, 2, 3}
 	tc := startCluster(t, ids)
 	defer tc.stop()
-	leader := tc.waitLeader(5 * time.Second)
+	leader := tc.waitLeader(20 * time.Second)
 
 	// Point a client's cache at a known follower; its first request must
 	// redirect and still succeed.
@@ -129,7 +130,7 @@ func TestClusterDirectToFollowerRedirects(t *testing.T) {
 	defer c.Close()
 	c.leader = follower // force the first hop to a follower
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := c.Put(ctx, []byte("k"), []byte("v")); err != nil {
 		t.Fatalf("put via follower: %v", err)

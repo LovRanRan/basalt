@@ -113,9 +113,13 @@ func Open(cfg Config) (*Node, error) {
 	for id := range cfg.Peers {
 		ids = append(ids, id)
 	}
+	// Per-node RNG: without distinct seeds every node draws identical
+	// election timeouts and splits the vote forever.
+	rng := splitmix(cfg.ID*0x9e3779b97f4a7c15 + 1)
 	rn := raft.RestoreNode(raft.Config{
 		ID: cfg.ID, Peers: ids,
 		ElectionTick: cfg.ElectionTick, HeartbeatTick: cfg.HeartbeatTick,
+		Rand: func(hi int) int { return int(rng() % uint64(hi)) },
 	}, rec, sm.AppliedIndex())
 
 	n := &Node{
@@ -147,6 +151,17 @@ func Open(cfg Config) (*Node, error) {
 	}
 	go n.run()
 	return n, nil
+}
+
+func splitmix(seed uint64) func() uint64 {
+	s := seed
+	return func() uint64 {
+		s += 0x9e3779b97f4a7c15
+		z := s
+		z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+		z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+		return z ^ (z >> 31)
+	}
 }
 
 func (n *Node) closeConns() {
