@@ -70,8 +70,9 @@ type Node struct {
 	mu     sync.RWMutex
 	groups map[uint64]*group
 
-	peers map[uint64]basaltv1.RaftServiceClient
-	conns []*grpc.ClientConn
+	peers   map[uint64]basaltv1.RaftServiceClient
+	kvPeers map[uint64]basaltv1.KVServiceClient // for forwarding client requests
+	conns   []*grpc.ClientConn
 }
 
 // Open starts a member: it dials peers, opens every configured raft group
@@ -93,8 +94,9 @@ func Open(cfg Config) (*Node, error) {
 	}
 	n := &Node{
 		cfg: cfg, peerIDs: peerIDs,
-		groups: map[uint64]*group{},
-		peers:  map[uint64]basaltv1.RaftServiceClient{},
+		groups:  map[uint64]*group{},
+		peers:   map[uint64]basaltv1.RaftServiceClient{},
+		kvPeers: map[uint64]basaltv1.KVServiceClient{},
 	}
 	for id, addr := range cfg.Peers {
 		if id == cfg.ID {
@@ -107,6 +109,7 @@ func Open(cfg Config) (*Node, error) {
 		}
 		n.conns = append(n.conns, conn)
 		n.peers[id] = basaltv1.NewRaftServiceClient(conn)
+		n.kvPeers[id] = basaltv1.NewKVServiceClient(conn)
 	}
 	for _, gid := range cfg.Groups {
 		g, err := openGroup(gid, cfg.ID, peerIDs, n.groupDir(gid),

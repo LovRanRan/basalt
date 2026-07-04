@@ -548,7 +548,11 @@ type ScanRequest struct {
 	// end is exclusive; empty means past the last key.
 	End []byte `protobuf:"bytes,2,opt,name=end,proto3" json:"end,omitempty"`
 	// limit caps the total pairs returned; zero means unlimited.
-	Limit         uint64 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
+	Limit uint64 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
+	// group, when non-zero, asks the addressed node to scan exactly that
+	// raft group (an internal scatter-gather leg); zero is a client-facing
+	// scan that the front door fans out across every group.
+	Group         uint64 `protobuf:"varint,4,opt,name=group,proto3" json:"group,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -600,6 +604,13 @@ func (x *ScanRequest) GetEnd() []byte {
 func (x *ScanRequest) GetLimit() uint64 {
 	if x != nil {
 		return x.Limit
+	}
+	return 0
+}
+
+func (x *ScanRequest) GetGroup() uint64 {
+	if x != nil {
+		return x.Group
 	}
 	return 0
 }
@@ -737,11 +748,12 @@ const file_basalt_v1_kv_proto_rawDesc = "" +
 	"\vPutResponse\"!\n" +
 	"\rDeleteRequest\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\fR\x03key\"\x10\n" +
-	"\x0eDeleteResponse\"K\n" +
+	"\x0eDeleteResponse\"a\n" +
 	"\vScanRequest\x12\x14\n" +
 	"\x05start\x18\x01 \x01(\fR\x05start\x12\x10\n" +
 	"\x03end\x18\x02 \x01(\fR\x03end\x12\x14\n" +
-	"\x05limit\x18\x03 \x01(\x04R\x05limit\"9\n" +
+	"\x05limit\x18\x03 \x01(\x04R\x05limit\x12\x14\n" +
+	"\x05group\x18\x04 \x01(\x04R\x05group\"9\n" +
 	"\fScanResponse\x12)\n" +
 	"\x05pairs\x18\x01 \x03(\v2\x13.basalt.v1.KeyValueR\x05pairs\"2\n" +
 	"\bKeyValue\x12\x10\n" +

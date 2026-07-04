@@ -75,6 +75,10 @@ message ScanRequest {
   bytes end = 2;
   // limit caps the total pairs returned; zero means unlimited.
   uint64 limit = 3;
+  // group, when non-zero, asks the addressed node to scan exactly that
+  // raft group (an internal scatter-gather leg); zero is a client-facing
+  // scan that the front door fans out across every group.
+  uint64 group = 4;
 }
 
 message ScanResponse {

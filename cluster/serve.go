@@ -40,14 +40,19 @@ func (n *Node) Serve(raftLis, kvLis net.Listener) *Servers {
 }
 
 // ServeSharded is Serve with a shard-routing KV service: point operations
-// route to the group owning the key's slot per the shard map.
+// route to the group owning the key's slot per the shard map, forwarding to
+// the leader node when this node is not it. The KV service is registered on
+// BOTH the peer (raft) server and the client server, so a node can forward a
+// client request to a peer over the same connection it uses for consensus.
 func (n *Node) ServeSharded(raftLis, kvLis net.Listener, smap *shard.ShardMap) *Servers {
+	skv := newShardKV(n, smap)
 	rs := grpc.NewServer()
 	basaltv1.RegisterRaftServiceServer(rs, &raftServer{n: n})
+	basaltv1.RegisterKVServiceServer(rs, skv)
 	go func() { _ = rs.Serve(raftLis) }()
 
 	ks := grpc.NewServer()
-	basaltv1.RegisterKVServiceServer(ks, newShardKV(n, smap))
+	basaltv1.RegisterKVServiceServer(ks, skv)
 	go func() { _ = ks.Serve(kvLis) }()
 
 	return &Servers{Raft: rs, KV: ks}

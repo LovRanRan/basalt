@@ -1,8 +1,11 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"sort"
 	"sync/atomic"
 
 	"google.golang.org/grpc/codes"
@@ -13,41 +16,35 @@ import (
 	"github.com/LovRanRan/basalt/internal/shard"
 )
 
-// shardKV serves the client KVService against a sharded cluster: a key's
-// slot selects its raft group, and the request is proposed through (or read
-// from) that group if this node hosts its leader — otherwise it returns a
-// not-leader redirect. Cross-group ordered Scan is the router's job (P4.4);
-// this server handles point operations.
+// scanBatch is how many pairs one streamed ScanResponse carries.
+const scanBatch = 256
+
+// shardKV is the sharded front door. Any node can serve any request: a
+// point op routes to the group owning the key's slot and, if this node does
+// not lead that group, forwards to the node that does; Scan fans out across
+// every group, pulling each group's slice from its leader and merge-sorting
+// into one globally ordered stream. A short redirect protocol handles
+// leadership changing mid-flight.
 type shardKV struct {
 	basaltv1.UnimplementedKVServiceServer
-	n    *Node
-	smap *shard.ShardMap
-	seq  perNodeSeq
-}
-
-type perNodeSeq struct {
+	n      *Node
+	smap   *shard.ShardMap
 	client uint64
 	seq    atomic.Uint64
 }
 
 func newShardKV(n *Node, smap *shard.ShardMap) *shardKV {
-	return &shardKV{n: n, smap: smap, seq: perNodeSeq{client: n.cfg.ID}}
+	return &shardKV{n: n, smap: smap, client: n.cfg.ID}
 }
 
-// groupFor returns the local group that owns key, or a not-leader-style
-// error the client should redirect on when this node does not host it (it
-// does host every group in the all-nodes-all-groups placement, but a
-// future partial placement would redirect).
-func (s *shardKV) groupFor(key []byte) (*group, error) {
-	gid := s.smap.Lookup(key)
-	if gid == 0 {
-		return nil, status.Error(codes.FailedPrecondition, "shard: key maps to an unassigned slot")
-	}
+// leaderOf returns the node currently leading a group, or 0 if unknown.
+func (s *shardKV) leaderOf(gid uint64) uint64 {
 	g := s.n.Group(gid)
 	if g == nil {
-		return nil, status.Errorf(codes.FailedPrecondition, "not-leader:0")
+		return 0
 	}
-	return g, nil
+	l, _, _ := g.Status()
+	return l
 }
 
 func (s *shardKV) command(key, value []byte, del bool) *basalt.Command {
@@ -57,23 +54,28 @@ func (s *shardKV) command(key, value []byte, del bool) *basalt.Command {
 	} else {
 		b.Put(key, value)
 	}
-	return &basalt.Command{ClientID: s.seq.client, Seq: s.seq.seq.Add(1), Batch: b}
+	return &basalt.Command{ClientID: s.client, Seq: s.seq.Add(1), Batch: b}
 }
 
 func (s *shardKV) Put(ctx context.Context, req *basaltv1.PutRequest) (*basaltv1.PutResponse, error) {
 	if err := validKey(req.GetKey()); err != nil {
 		return nil, err
 	}
-	g, err := s.groupFor(req.GetKey())
-	if err != nil {
-		return nil, err
+	gid := s.smap.Lookup(req.GetKey())
+	if gid == 0 {
+		return nil, status.Error(codes.FailedPrecondition, "shard: key maps to an unassigned slot")
+	}
+	g := s.n.Group(gid)
+	if g == nil || s.leaderOf(gid) != s.n.cfg.ID {
+		// Not the leader of the owning group: forward to the leader node.
+		if peer, ok := s.forwardTarget(gid); ok {
+			return peer.Put(ctx, req)
+		}
+		return nil, status.Errorf(codes.Unavailable, "shard: no leader for group %d", gid)
 	}
 	perr := g.Propose(ctx, s.command(req.GetKey(), req.GetValue(), false))
-	if r := redirect(perr); r != nil {
-		return nil, r
-	}
 	if perr != nil {
-		return nil, status.Error(codes.Unavailable, perr.Error())
+		return nil, mapErr(perr)
 	}
 	return &basaltv1.PutResponse{}, nil
 }
@@ -82,16 +84,19 @@ func (s *shardKV) Delete(ctx context.Context, req *basaltv1.DeleteRequest) (*bas
 	if err := validKey(req.GetKey()); err != nil {
 		return nil, err
 	}
-	g, err := s.groupFor(req.GetKey())
-	if err != nil {
-		return nil, err
+	gid := s.smap.Lookup(req.GetKey())
+	if gid == 0 {
+		return nil, status.Error(codes.FailedPrecondition, "shard: key maps to an unassigned slot")
 	}
-	perr := g.Propose(ctx, s.command(req.GetKey(), nil, true))
-	if r := redirect(perr); r != nil {
-		return nil, r
+	g := s.n.Group(gid)
+	if g == nil || s.leaderOf(gid) != s.n.cfg.ID {
+		if peer, ok := s.forwardTarget(gid); ok {
+			return peer.Delete(ctx, req)
+		}
+		return nil, status.Errorf(codes.Unavailable, "shard: no leader for group %d", gid)
 	}
-	if perr != nil {
-		return nil, status.Error(codes.Unavailable, perr.Error())
+	if perr := g.Propose(ctx, s.command(req.GetKey(), nil, true)); perr != nil {
+		return nil, mapErr(perr)
 	}
 	return &basaltv1.DeleteResponse{}, nil
 }
@@ -100,16 +105,19 @@ func (s *shardKV) Get(ctx context.Context, req *basaltv1.GetRequest) (*basaltv1.
 	if err := validKey(req.GetKey()); err != nil {
 		return nil, err
 	}
-	g, err := s.groupFor(req.GetKey())
-	if err != nil {
-		return nil, err
+	gid := s.smap.Lookup(req.GetKey())
+	if gid == 0 {
+		return nil, status.Error(codes.FailedPrecondition, "shard: key maps to an unassigned slot")
 	}
-	rerr := g.ReadIndex(ctx)
-	if r := redirect(rerr); r != nil {
-		return nil, r
+	g := s.n.Group(gid)
+	if g == nil || s.leaderOf(gid) != s.n.cfg.ID {
+		if peer, ok := s.forwardTarget(gid); ok {
+			return peer.Get(ctx, req)
+		}
+		return nil, status.Errorf(codes.Unavailable, "shard: no leader for group %d", gid)
 	}
-	if rerr != nil {
-		return nil, status.Error(codes.Unavailable, rerr.Error())
+	if rerr := g.ReadIndex(ctx); rerr != nil {
+		return nil, mapErr(rerr)
 	}
 	v, gerr := g.DB().Get(req.GetKey())
 	if errors.Is(gerr, basalt.ErrNotFound) {
@@ -119,4 +127,161 @@ func (s *shardKV) Get(ctx context.Context, req *basaltv1.GetRequest) (*basaltv1.
 		return nil, status.Error(codes.Internal, gerr.Error())
 	}
 	return &basaltv1.GetResponse{Found: true, Value: v}, nil
+}
+
+// forwardTarget returns the KV client for the node leading gid, or false.
+func (s *shardKV) forwardTarget(gid uint64) (basaltv1.KVServiceClient, bool) {
+	leader := s.leaderOf(gid)
+	if leader == 0 || leader == s.n.cfg.ID {
+		return nil, false
+	}
+	s.n.mu.RLock()
+	peer, ok := s.n.kvPeers[leader]
+	s.n.mu.RUnlock()
+	return peer, ok
+}
+
+// Scan fans out. A group-scoped request (Group != 0) scans exactly that
+// group on its leader; a client-facing request (Group == 0) pulls every
+// group's slice — locally or forwarded to each leader — and merge-sorts.
+func (s *shardKV) Scan(req *basaltv1.ScanRequest, stream basaltv1.KVService_ScanServer) error {
+	if req.GetGroup() != 0 {
+		return s.scanGroup(req, stream)
+	}
+	return s.scanAllGroups(req, stream)
+}
+
+// scanGroup serves one group's slice, ReadIndex-consistent, on its leader.
+func (s *shardKV) scanGroup(req *basaltv1.ScanRequest, stream basaltv1.KVService_ScanServer) error {
+	gid := req.GetGroup()
+	g := s.n.Group(gid)
+	if g == nil || s.leaderOf(gid) != s.n.cfg.ID {
+		return status.Errorf(codes.FailedPrecondition, "shard: group %d not led here", gid)
+	}
+	if err := g.ReadIndex(stream.Context()); err != nil {
+		return mapErr(err)
+	}
+	var start, end []byte
+	if len(req.GetStart()) > 0 {
+		start = req.GetStart()
+	}
+	if len(req.GetEnd()) > 0 {
+		end = req.GetEnd()
+	}
+	it := g.DB().Scan(start, end)
+	defer it.Close()
+	batch := make([]*basaltv1.KeyValue, 0, scanBatch)
+	for ; it.Valid(); it.Next() {
+		batch = append(batch, &basaltv1.KeyValue{
+			Key:   append([]byte(nil), it.Key()...),
+			Value: append([]byte(nil), it.Value()...),
+		})
+		if len(batch) == scanBatch {
+			if err := stream.Send(&basaltv1.ScanResponse{Pairs: batch}); err != nil {
+				return err
+			}
+			batch = batch[:0]
+		}
+	}
+	if err := it.Error(); err != nil {
+		return mapErr(err)
+	}
+	if len(batch) > 0 {
+		return stream.Send(&basaltv1.ScanResponse{Pairs: batch})
+	}
+	return nil
+}
+
+// scanAllGroups is the coordinator: gather every group's pairs, merge-sort
+// globally, apply the range and limit, and stream. Hashing destroys range
+// locality, so a full scan must touch every group.
+func (s *shardKV) scanAllGroups(req *basaltv1.ScanRequest, stream basaltv1.KVService_ScanServer) error {
+	ctx := stream.Context()
+	var all []*basaltv1.KeyValue
+	for _, gid := range s.smap.Groups() {
+		pairs, err := s.gatherGroup(ctx, gid, req)
+		if err != nil {
+			return err
+		}
+		all = append(all, pairs...)
+	}
+	sort.Slice(all, func(i, j int) bool { return bytes.Compare(all[i].GetKey(), all[j].GetKey()) < 0 })
+	if req.GetLimit() > 0 && uint64(len(all)) > req.GetLimit() {
+		all = all[:req.GetLimit()]
+	}
+	for i := 0; i < len(all); i += scanBatch {
+		end := i + scanBatch
+		if end > len(all) {
+			end = len(all)
+		}
+		if err := stream.Send(&basaltv1.ScanResponse{Pairs: all[i:end]}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// gatherGroup collects one group's pairs, locally if we lead it else from
+// the leader node.
+func (s *shardKV) gatherGroup(ctx context.Context, gid uint64, req *basaltv1.ScanRequest) ([]*basaltv1.KeyValue, error) {
+	sub := &basaltv1.ScanRequest{Start: req.GetStart(), End: req.GetEnd(), Group: gid}
+	var scanStream basaltv1.KVService_ScanClient
+	if s.leaderOf(gid) == s.n.cfg.ID {
+		return s.gatherLocal(ctx, gid, req)
+	}
+	peer, ok := s.forwardTarget(gid)
+	if !ok {
+		return nil, status.Errorf(codes.Unavailable, "shard: no leader for group %d", gid)
+	}
+	var err error
+	scanStream, err = peer.Scan(ctx, sub)
+	if err != nil {
+		return nil, err
+	}
+	var out []*basaltv1.KeyValue
+	for {
+		resp, err := scanStream.Recv()
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, resp.GetPairs()...)
+	}
+}
+
+// gatherLocal scans a group this node leads, without a network hop.
+func (s *shardKV) gatherLocal(ctx context.Context, gid uint64, req *basaltv1.ScanRequest) ([]*basaltv1.KeyValue, error) {
+	g := s.n.Group(gid)
+	if err := g.ReadIndex(ctx); err != nil {
+		return nil, mapErr(err)
+	}
+	var start, end []byte
+	if len(req.GetStart()) > 0 {
+		start = req.GetStart()
+	}
+	if len(req.GetEnd()) > 0 {
+		end = req.GetEnd()
+	}
+	it := g.DB().Scan(start, end)
+	defer it.Close()
+	var out []*basaltv1.KeyValue
+	for ; it.Valid(); it.Next() {
+		out = append(out, &basaltv1.KeyValue{
+			Key:   append([]byte(nil), it.Key()...),
+			Value: append([]byte(nil), it.Value()...),
+		})
+	}
+	return out, it.Error()
+}
+
+// mapErr turns a group error into a client status: a not-leader redirect
+// (leadership changed mid-flight) or Unavailable.
+func mapErr(err error) error {
+	var nl *ErrNotLeader
+	if errors.As(err, &nl) {
+		return status.Errorf(codes.FailedPrecondition, "not-leader:%d", nl.Leader)
+	}
+	return status.Error(codes.Unavailable, err.Error())
 }
