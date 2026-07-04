@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | **Phases 1-3 COMPLETE** → Phase 4 — sharding and hardening |
-| Next commit | P4.2 — `feat(shard): fixed hash-slot table mapping keys to raft groups` |
-| Commits done | 28 / 39 (P1: 11/11 · P2: 5/5 · P3: 11/11 · P4: 1/12) |
+| Next commit | P4.3 — `feat(cluster): static cluster config file and multi-node bootstrap tooling` |
+| Commits done | 29 / 39 (P1: 11/11 · P2: 5/5 · P3: 11/11 · P4: 2/12) |
 | Blockers | none (P1.9/P1.10 make-up review complete — 2 blockers found and fixed) |
 | Last updated | 2026-07-04 |
 
@@ -94,13 +94,13 @@ Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated stat
 - [x] **P3.11** `test(raft): leader-kill smoke test and replication benchmarks` — black-box process-level leader-kill smoke test plus replicated write throughput/latency benchmarks with baseline numbers recorded. *(Trimmed per design review — the full chaos harness lives in Phase 4.)*
   *Done when: smoke test survives repeated leader kills with zero acked-write loss; `make bench-raft` emits baselines.*
 
-### Phase 4 — sharding and hardening (1/12)
+### Phase 4 — sharding and hardening (2/12)
 
 Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchmark report, docs. *(Design review: vnode ring replaced by fixed hash slots; cluster config lands before the router; shard-map distribution inserted; rebalance split in two.)*
 
 - [x] **P4.1** `refactor(raft): host multiple raft groups per process behind a group manager` — GroupManager supervising N groups with namespaced on-disk paths; transport multiplexed by group id; single-group becomes the degenerate case.
   *Done when: one process hosts multiple independently electing/replicating groups with the prior suite still green.*
-- [ ] **P4.2** `feat(shard): fixed hash-slot table mapping keys to raft groups` — 256 hash slots → groupID (Redis-cluster style), deterministic cross-platform hash, versioned ShardMap type; pure routing math, no I/O. *(Replaced consistent-hash vnode ring per design review: slots make ownership contiguous and per-slot migration well-defined.)*
+- [x] **P4.2** `feat(shard): fixed hash-slot table mapping keys to raft groups` — 256 hash slots → groupID (Redis-cluster style), deterministic cross-platform hash, versioned ShardMap type; pure routing math, no I/O. *(Replaced consistent-hash vnode ring per design review: slots make ownership contiguous and per-slot migration well-defined.)*
   *Done when: Lookup is deterministic and balanced; slot reassignment provably moves only the reassigned slots' keys (unit + fuzz tests).*
 - [ ] **P4.3** `feat(cluster): static cluster config file and multi-node bootstrap tooling` — declarative YAML (nodes, groups, slot assignment, placement), fail-fast validation, `make cluster-up` boots a local 3-node/3-group cluster. *(Moved before the router per design review — the router's integration test needs this tooling.)*
   *Done when: `make cluster-up` starts a 3-node/3-group cluster from one config; malformed configs rejected with actionable errors.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P4.2** `feat(shard): fixed hash-slot table mapping keys to raft groups` · `internal/shard`: 256 fixed hash slots (crc32c mod NumSlots — deterministic, platform-independent), a versioned immutable `ShardMap` assigning each slot to a group, with `Lookup`/`Group`/`SlotsFor`/`Groups` and copy-on-write `WithSlot` (move one slot, bump epoch) / `WithReassign` (drain a group wholesale). This is the design-review's replacement for a consistent-hash vnode ring: fixed slots make ownership explicit and migration a clean per-slot operation — moving a slot moves exactly its keys and disturbs no other slot (unit-tested: a single-slot move leaves all 255 others byte-identical). The epoch is the fencing token P4.6 will use. Pure routing math, no I/O. Tests race-clean incl. balance-within-tolerance, Lookup==Group(Slot), drain-a-group, and a 5.5M-exec fuzz over key bytes.
 
 - **2026-07-04** · **P4.1** `refactor(raft): host multiple raft groups per process behind a group manager` · Phase 4 opens. Split the per-group loop into `group` (raft node + engine + storage + event loop, keyed by group id) and reworked `Node` into a group manager: it hosts N groups, each under a group-namespaced data dir (`group-<id>/db`, `group-<id>/raft`), owns ONE gRPC connection per peer, and multiplexes all groups' consensus traffic over it — outgoing messages tagged with the group id (new proto field), incoming routed to the right group by id. Single-group is the degenerate default (`Groups` empty → group 1) and `Node.Propose/ReadIndex/DB/Status` delegate to the sole group, so P2/P3 behavior and tests are unchanged. Bug avoided: each (node,group) needs its own election RNG seed or groups split votes independently. Tests race-clean: 3 groups × 3 nodes elect independent leaders and replicate with zero cross-group contamination; single-group degenerate API still works; existing client-redirect + chaos suites green on the refactored transport.
 
