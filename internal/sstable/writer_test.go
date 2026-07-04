@@ -94,14 +94,14 @@ func checkBlock(t *testing.T, table []byte, h blockHandle, name string) []byte {
 	return contents
 }
 
-type indexEntry struct {
+type tIndexEntry struct {
 	key    []byte
 	handle blockHandle
 }
 
 // parseIndex validates the footer and index block and returns the index
 // entries. The index uses restart interval 1: every entry is a full key.
-func parseIndex(t *testing.T, table []byte) []indexEntry {
+func parseIndex(t *testing.T, table []byte) []tIndexEntry {
 	t.Helper()
 	ftr, err := decodeFooter(table[len(table)-footerLen:])
 	if err != nil {
@@ -111,7 +111,7 @@ func parseIndex(t *testing.T, table []byte) []indexEntry {
 	nRestarts := int(binary.LittleEndian.Uint32(index[len(index)-4:]))
 	entriesEnd := len(index) - 4 - 4*nRestarts
 	rest := index[:entriesEnd]
-	var entries []indexEntry
+	var entries []tIndexEntry
 	for len(rest) > 0 {
 		shared, n1 := binary.Uvarint(rest)
 		rest = rest[n1:]
@@ -129,7 +129,7 @@ func parseIndex(t *testing.T, table []byte) []indexEntry {
 		if !ok {
 			t.Fatal("bad block handle in index")
 		}
-		entries = append(entries, indexEntry{key: key, handle: h})
+		entries = append(entries, tIndexEntry{key: key, handle: h})
 	}
 	if nRestarts != len(entries) {
 		t.Fatalf("index restarts = %d, want one per entry (%d)", nRestarts, len(entries))

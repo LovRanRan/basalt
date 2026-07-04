@@ -170,9 +170,10 @@ func (w *Writer) Finish() (Properties, error) {
 	if err := w.flushDataBlock(); err != nil {
 		return Properties{}, err
 	}
-	// The bloom bit count must fit u32 arithmetic; beyond it the filter
-	// would silently degrade (wrapped modulus) or divide by zero.
-	if uint64(len(w.hashes))*uint64(w.opts.BitsPerKey) >= 1<<32 {
+	// The byte-rounded bloom bit count must fit u32 arithmetic; beyond it
+	// the filter would silently degrade (wrapped modulus) or divide by
+	// zero.
+	if bits := uint64(len(w.hashes)) * uint64(w.opts.BitsPerKey); (bits+7)/8*8 >= 1<<32 {
 		return Properties{}, w.fail(errBloomOverflow)
 	}
 	filterHandle, err := w.writeBlock(buildBloom(w.hashes, w.opts.BitsPerKey))

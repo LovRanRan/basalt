@@ -16,16 +16,16 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | Phase 1 — single-node LSM storage engine |
-| Next commit | P1.5 — `feat(sstable): reader with bloom-guarded point gets and seekable block iterators` |
-| Commits done | 4 / 39 (P1: 4/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
+| Next commit | P1.6 — `feat(manifest): version-edit log and current pointer for crash-safe file tracking` |
+| Commits done | 5 / 39 (P1: 5/11 · P2: 0/5 · P3: 0/11 · P4: 0/12) |
 | Blockers | none |
-| Last updated | 2026-07-03 |
+| Last updated | 2026-07-04 |
 
 ---
 
 ## Roadmap
 
-### Phase 1 — single-node LSM storage engine (4/11)
+### Phase 1 — single-node LSM storage engine (5/11)
 
 Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`, crash-safe on every path, with benchmarks.
 
@@ -37,13 +37,13 @@ Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`,
   *Done when: torn-write injection at every tail byte offset recovers exactly the committed prefix.*
 - [x] **P1.4** `feat(sstable): block-based writer with index block, bloom filter, and checksummed footer` — ~4KB data blocks with restart-point prefix compression, index block, ~10 bits/key bloom filter, versioned footer, crc32c per block, table properties for the manifest.
   *Done when: golden byte-layout test passes; out-of-order input fails with a typed error.*
-- [ ] **P1.5** `feat(sstable): reader with bloom-guarded point gets and seekable block iterators` — footer/checksum validation, bloom → index binary search → block restart-point search, lazy block loading, typed `ErrCorruption`.
-  *Done when: randomized roundtrip + corruption-detection suites pass on 100k-entry tables.*
+- [x] **P1.5** `feat(sstable): reader with bloom-guarded point gets and seekable block iterators` — footer/checksum validation, bloom → index binary search → block restart-point search, lazy block loading, typed `ErrCorruption`.
+  *Done when: randomized roundtrip on 100k-entry tables + every-byte corruption suite on a small table covering all block/filter/index/footer regions (every-byte-flip is O(size²) — infeasible on multi-MB tables) + hostile crafted-block suite.*
 - [ ] **P1.6** `feat(manifest): version-edit log and current pointer for crash-safe file tracking` — VersionEdit log on WAL framing, immutable Version snapshots, CURRENT swap via atomic rename+fsync, obsolete-file collector.
   *Done when: every injected crash point during manifest rotation recovers a consistent live-file set.*
 - [ ] **P1.7** `feat(engine): open, put, delete, and get with wal replay and memtable flush to l0` — Open = manifest recovery + WAL replay; writes go WAL → memtable under a monotonic seqno; background flush to L0 with atomic manifest edit + WAL segment GC.
   *Done when: full crash matrix (after WAL append / after L0 write / after manifest edit) recovers acked writes exactly, race-clean.*
-- [ ] **P1.8** `feat(engine): merging iterator, scan, version pinning, and seqno read snapshots` — k-way min-heap merge across memtables + SSTables, newest-seqno visibility, tombstone suppression, `Scan(start, end)`; **plus refcounted Version pinning and seqno-based read snapshots** so live iterators survive concurrent flush/compaction file retirement. *(Amended per design review: pinning moved here from the compaction commit — its own mid-scan-flush tests need it.)*
+- [ ] **P1.8** *(P1.5 note: the merge loop must check each sstable child's `Error()` whenever it goes invalid — exhaustion and failure look identical via `Valid()`; memtable iterators cannot fail.)* `feat(engine): merging iterator, scan, version pinning, and seqno read snapshots` — k-way min-heap merge across memtables + SSTables, newest-seqno visibility, tombstone suppression, `Scan(start, end)`; **plus refcounted Version pinning and seqno-based read snapshots** so live iterators survive concurrent flush/compaction file retirement. *(Amended per design review: pinning moved here from the compaction commit — its own mid-scan-flush tests need it.)*
   *Done when: differential get/scan model test passes across forced multi-table states, including mid-scan flushes.*
 - [ ] **P1.9** `feat(compaction): background leveled compaction with tombstone gc and atomic manifest commits` — level scoring (L0 by file count, L1+ by ~10x byte fanout), overlap-based input picking, shadowed-entry and bottom-level tombstone dropping, atomic file-swap manifest edit; reads proceed via the P1.8 pinned versions. *(P1.4 note: add `Writer.EstimatedSize()` — offset + pending data/index blocks — for output-file splitting; a counting io.Writer lags by the pending blocks.)*
   *Done when: 1M-op churn test holds level invariants + model equivalence, incl. crash-mid-compaction recovery.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P1.5** `feat(sstable): reader with bloom-guarded point gets and seekable block iterators` · Disk format closes the loop: `Reader` (eager footer/filter/index validation, lazy crc-verified data blocks, `Get(userKey, seq)` via bloom → index binary search → restart binary search), `Iterator` (First/SeekGE/Next/Error, lazy block hops), typed `ErrCorruption` everywhere. Review theme: **crc protects against accidents, not adversaries** — two blockers were crc-valid crafted files that panic the reader (uvarint sum wrapping the bounds check; sub-trailer restart keys hitting `base.Compare`), plus a quadratic-allocation DoS via prefix-extended index entries and 32-bit int truncation in restart parsing. All fixed centrally (overflow-safe two-part bounds check, trailer check moved into `decodeNext`, index requires full keys, u64 arithmetic) and pinned by a new hostile crafted-block suite — the every-byte-flip test can't reach post-crc validators, which is exactly how the panics shipped. Index/block disagreement now surfaces as corruption instead of a silent wrong answer. Tests race-clean: 100k roundtrip (iteration + 20k exact-seq gets + absent keys + 10k SeekGE vs reference), every-byte flips, hostile blocks/index, concurrent readers under -race, aliasing contracts. Done_when wording amended (small table for the O(size²) flip suite).
 
 - **2026-07-03** · **P1.4** `feat(sstable): block-based writer with index block, bloom filter, and checksummed footer` · Landed `internal/sstable` (writer half): prefix-compressed data blocks with restart points, whole-table bloom (LevelDB hash + double hashing, now format-pinned), index block at restart interval 1 (pure binary search) mapping each block's **last key** → uvarint handle, 48-byte fixed footer (u64 handles, version, crc over first 36 bytes, magic `0xba5a17557ab1e000`), crc32c trailer per block; Properties (count/smallest/largest/size) returned for the manifest; sticky-error writer rejects out-of-order/duplicate/short keys (`ErrOutOfOrder`). Review (format + reader-fit lenses at xhigh) confirmed every P1.5 seek path works against this format unchanged, and caught: **u32 truncation in bloom** (read side could panic on hostile filter → now reads as "maybe"; write side rejects ≥2³² filter bits), **restart-offset u32 overflow = silent corruption with a valid crc** (BlockSize capped 1 GiB + overflow poisons the writer), and **two golden holes** — no multi-restart block and no version-straddling block cut were pinned; golden regenerated (RestartInterval 2 + a third `user:0002` version) with structural assertions so future `-update` runs can't silently lose those shapes. Empty-block encoding (restart [0], count 1) documented as a P1.5 trap; `EstimatedSize()` noted for P1.9. Tests race-clean incl. I/O-failure stickiness, caller-buffer scribbling, exact-boundary `>=` cut; bloom fpr 10 bits/key < 2.5% observed.
 
