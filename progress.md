@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | Phase 3 — hand-written Raft replication |
-| Next commit | P3.3 — `test(raft): deterministic network simulator with seeded partitions and message loss` |
-| Commits done | 18 / 39 (P1: 11/11 · P2: 5/5 · P3: 2/11 · P4: 0/12) |
+| Next commit | P3.4 — `feat(raft): log replication with appendentries and commit index advancement` |
+| Commits done | 19 / 39 (P1: 11/11 · P2: 5/5 · P3: 3/11 · P4: 0/12) |
 | Blockers | none (P1.9/P1.10 make-up review running in background) |
 | Last updated | 2026-07-04 |
 
@@ -67,7 +67,7 @@ Goal: Basalt as a real service — gRPC API, CLI client, observability, Docker +
 - [x] **P2.5** `build(release): dockerfile and end-to-end smoke test wired into ci` — multi-stage distroless image; e2e test drives the real CLI against a real server including kill + restart WAL recovery.
   *Done when: CI builds the image and the e2e job passes, incl. data surviving server kill/restart.*
 
-### Phase 3 — hand-written Raft replication (2/11)
+### Phase 3 — hand-written Raft replication (3/11)
 
 Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated state machine, linearizable reads, survives leader kills.
 
@@ -75,7 +75,7 @@ Goal: Raft from the paper (no etcd/hashicorp), LSM engine as the replicated stat
   *Done when: a node is drivable entirely by Step/Tick in unit tests with zero goroutines/timers/sockets.*
 - [x] **P3.2** `feat(raft): leader election with randomized timeouts, requestvote, and prevote` — Figure 2 transitions, [T, 2T) randomized timeouts from an injectable rand, vote-once-per-term with log up-to-dateness check; **PreVote so partitioned nodes don't depose healthy leaders on heal**. *(Amended per design review: Phase 4 partition suites need PreVote for non-flaky liveness.)*
   *Done when: 3-node in-memory cluster elects exactly one leader per term across 1000 seeded runs.*
-- [ ] **P3.3** `test(raft): deterministic network simulator with seeded partitions and message loss` — virtual clock, in-memory network with drop/duplicate/reorder/delay/partition, single seeded RNG, failing seeds replay identically.
+- [x] **P3.3** `test(raft): deterministic network simulator with seeded partitions and message loss` — virtual clock, in-memory network with drop/duplicate/reorder/delay/partition, single seeded RNG, failing seeds replay identically.
   *Done when: ElectionSafety verified over 2000+ seeds; any failing seed reproduces exactly.*
 - [ ] **P3.4** `feat(raft): log replication with appendentries and commit index advancement` — nextIndex/matchIndex, consistency check, conflict-term fast backtracking, Figure 8 commit rule.
   *Done when: under 20% simulated loss + leader kills, every acked-committed entry is identical at the same index on all nodes.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P3.3** `test(raft): deterministic network simulator with seeded partitions and message loss` · `internal/raft/rafttest`: virtual clock + in-memory network with seeded drop/dup/delay/partition, one splitmix RNG driving everything (node election jitter included). `Tick` advances the clock, ticks nodes, then settles all cascades (deliver due → pump Ready → repeat until quiet) so a tick fully resolves; messages carry a (deliverAt, seq) total order so reordering stays deterministic. Harness is the storage layer (persist+apply inline). Tests: 2000-seed ElectionSafety under 20% loss/10% dup/delay-3 (no two leaders per term, failing seed prints itself), byte-identical replay from a seed, partitioned-leader-is-supplanted-and-steps-down-on-heal. Replication assertions deferred to P3.4 (not built yet). Note: same-seed determinism confirmed — the whole point of the harness.
 
 - **2026-07-04** · **P3.2** `feat(raft): leader election with randomized timeouts, requestvote, and prevote` · Full Figure-2 election: follower→(pre)candidate→leader, randomized timeouts in [T,2T) from an injectable `Rand` (default: deterministic splitmix so a config-less Node still reproduces), heartbeat tick, vote-once-per-term with the up-to-dateness check, higher-term demotion. **PreVote** landed here (moved up from the roadmap note): `Campaign` runs a term-non-bumping pre-round first, so a partitioned node cannot ratchet its term and depose a healthy leader on heal (tested: 5 isolated campaigns leave the term flat, heal restores order with no election). A minimal same-term MsgApp handler recognizes the leader (candidate steps down, timer resets) — P3.4 replaces it with real replication. Tests deterministic, zero goroutines/timers: single leader per term, two-candidate safety, prevote non-disruption, randomized-bounded timeouts, 200-seed election-safety over a 5-node cluster (never two leaders in one term).
 
