@@ -132,7 +132,7 @@ func Open(dir string, opts Options) (*VersionSet, error) {
 	if err := vs.rotate(); err != nil {
 		return nil, err
 	}
-	if _, err := vs.DeleteObsolete(); err != nil {
+	if _, err := vs.DeleteObsolete(nil); err != nil {
 		return nil, err
 	}
 	return vs, nil
@@ -382,9 +382,10 @@ func (vs *VersionSet) AdvanceLastSeq(n uint64) {
 
 // DeleteObsolete removes table files not in the current version, manifests
 // other than the current one, and any leftover CURRENT.tmp, returning the
-// removed names. The caller must only invoke it when no unlogged table
-// files are pending (at open, or right after an Apply).
-func (vs *VersionSet) DeleteObsolete() ([]string, error) {
+// removed names. protect names table numbers that are pending — written but
+// not yet logged by an edit (a concurrent flush or compaction output) — and
+// must include every such file or it will be destroyed here.
+func (vs *VersionSet) DeleteObsolete(protect map[uint64]bool) ([]string, error) {
 	if vs.err != nil {
 		return nil, vs.err
 	}
@@ -398,7 +399,7 @@ func (vs *VersionSet) DeleteObsolete() ([]string, error) {
 		name := ent.Name()
 		var doomed bool
 		if num, ok := parseTableName(name); ok {
-			doomed = !live[num]
+			doomed = !live[num] && !protect[num]
 		} else if num, ok := parseManifestName(name); ok {
 			doomed = num != vs.manifestNum
 		} else if name == currentName+".tmp" {

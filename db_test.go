@@ -256,8 +256,8 @@ func TestFlushesProduceTablesAndSurviveReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db2.Close() }()
-	if len(db2.rs.l0) < 2 {
-		t.Fatalf("expected multiple L0 tables, got %d", len(db2.rs.l0))
+	if len(db2.rs.levels[0]) < 2 {
+		t.Fatalf("expected multiple L0 tables, got %d", len(db2.rs.levels[0]))
 	}
 	for i := 0; i < n; i++ {
 		v, err := db2.Get(key(i))

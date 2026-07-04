@@ -217,7 +217,7 @@ func TestCrashDuringRotationRecoversConsistently(t *testing.T) {
 			if vs2.LastSeq() != 777 {
 				t.Fatalf("recovered lastSeq = %d, want 777", vs2.LastSeq())
 			}
-			if _, err := vs2.DeleteObsolete(); err != nil {
+			if _, err := vs2.DeleteObsolete(nil); err != nil {
 				t.Fatal(err)
 			}
 			if err := vs2.Apply(&VersionEdit{AddFiles: []FileMeta{fm(3, vs2.AllocFileNum(), "g", "h")}}); err != nil {
@@ -263,7 +263,7 @@ func TestCollectorNeverDeletesLive(t *testing.T) {
 		}
 
 		if rng.Intn(4) == 0 {
-			if _, err := vs.DeleteObsolete(); err != nil {
+			if _, err := vs.DeleteObsolete(nil); err != nil {
 				t.Fatal(err)
 			}
 			for num := range live {

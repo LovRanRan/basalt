@@ -6,31 +6,45 @@ import (
 	"sync/atomic"
 
 	"github.com/LovRanRan/basalt/internal/base"
+	"github.com/LovRanRan/basalt/internal/manifest"
 	"github.com/LovRanRan/basalt/internal/memtable"
 )
 
-// readState is the engine's read view: the memtables and L0 set that a
+// readState is the engine's read view: the memtables and table set that a
 // reader or iterator pins for its lifetime. Pinning is refcounted so a
-// mid-scan flush installs a new state without invalidating live readers.
-// Releasing frees nothing yet — tables are immortal until P1.9's compaction
-// deletes files, and memtables are garbage collected — but the counter
-// discipline is enforced now so P1.9 only has to hook resource release.
+// mid-scan flush or compaction installs a new state without invalidating
+// live readers; the state refs every table handle it includes and unrefs
+// them when the last pin releases, closing files retired by compaction
+// only once nobody can still read them.
 type readState struct {
-	mem  *memtable.MemTable
-	imm  *memtable.MemTable // may be nil
-	l0   []*tableHandle     // newest first
-	refs atomic.Int32
+	mem    *memtable.MemTable
+	imm    *memtable.MemTable                 // may be nil
+	levels [manifest.NumLevels][]*tableHandle // L0 newest-first; deeper levels key-sorted, disjoint
+	refs   atomic.Int32
 }
 
-func newReadState(mem, imm *memtable.MemTable, l0 []*tableHandle) *readState {
-	rs := &readState{mem: mem, imm: imm, l0: l0}
+func newReadState(mem, imm *memtable.MemTable, levels [manifest.NumLevels][]*tableHandle) *readState {
+	rs := &readState{mem: mem, imm: imm, levels: levels}
+	for _, level := range rs.levels {
+		for _, h := range level {
+			h.ref()
+		}
+	}
 	rs.refs.Store(1) // the DB's own reference
 	return rs
 }
 
 func (rs *readState) release() {
-	if rs.refs.Add(-1) < 0 {
+	n := rs.refs.Add(-1)
+	if n < 0 {
 		panic("basalt: readState released below zero")
+	}
+	if n == 0 {
+		for _, level := range rs.levels {
+			for _, h := range level {
+				h.unref()
+			}
+		}
 	}
 }
 
@@ -74,13 +88,15 @@ func (db *DB) Scan(start, end []byte) *Iterator {
 	if err != nil {
 		return &Iterator{err: err, closed: true}
 	}
-	children := make([]internalIterator, 0, 2+len(rs.l0))
+	children := make([]internalIterator, 0, 8)
 	children = append(children, rs.mem.NewIterator())
 	if rs.imm != nil {
 		children = append(children, rs.imm.NewIterator())
 	}
-	for _, h := range rs.l0 {
-		children = append(children, h.r.NewIterator())
+	for _, level := range rs.levels {
+		for _, h := range level {
+			children = append(children, h.r.NewIterator())
+		}
 	}
 	it := &Iterator{rs: rs, m: newMergingIter(children), seq: seq}
 	if end != nil {

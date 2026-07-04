@@ -156,6 +156,13 @@ func (w *Writer) writeBlock(contents []byte) (blockHandle, error) {
 	return h, nil
 }
 
+// EstimatedSize returns the table's projected on-disk size if finished
+// now: bytes already written plus the pending data and index blocks.
+// Compaction uses it to split output files at a target size.
+func (w *Writer) EstimatedSize() uint64 {
+	return w.offset + uint64(w.data.estimatedSize()) + uint64(w.index.estimatedSize())
+}
+
 // Finish flushes the pending data block, writes the filter block, index
 // block, and footer, and returns the table's properties. The caller owns
 // syncing and durably naming the underlying file.
