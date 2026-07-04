@@ -24,12 +24,13 @@ func splitmixTest(seed uint64) func() uint64 {
 // replica is one member: raft node + storage + WAL-less engine + state
 // machine, glued by a test pump.
 type replica struct {
-	id   uint64
-	node *raft.Node
-	st   *raft.Storage
-	db   *DB
-	sm   *StateMachine
-	dir  string
+	id    uint64
+	node  *raft.Node
+	st    *raft.Storage
+	db    *DB
+	sm    *StateMachine
+	dir   string
+	reads map[uint64]bool // read ids that surfaced as served (linearizable)
 }
 
 type smCluster struct {
@@ -65,7 +66,7 @@ func openReplica(t *testing.T, dir string, id uint64, ids []uint64) *replica {
 		ID: id, Peers: ids, ElectionTick: 10,
 		Rand: func(hi int) int { return int(rng() % uint64(hi)) },
 	}, rec, sm.AppliedIndex())
-	return &replica{id: id, node: node, st: st, db: db, sm: sm, dir: dir}
+	return &replica{id: id, node: node, st: st, db: db, sm: sm, dir: dir, reads: map[uint64]bool{}}
 }
 
 func newSMCluster(t *testing.T, ids []uint64) *smCluster {
@@ -100,6 +101,9 @@ func (c *smCluster) pump(ticks int) {
 				}
 				if err := r.sm.Apply(rd.CommittedEntries); err != nil {
 					t.Fatal(err)
+				}
+				for _, rs := range rd.ReadStates {
+					r.reads[rs.ID] = true
 				}
 				c.queue = append(c.queue, rd.Messages...)
 				r.node.Advance(rd)

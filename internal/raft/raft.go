@@ -92,6 +92,9 @@ type Ready struct {
 	Entries          []Entry
 	CommittedEntries []Entry
 	Messages         []Message
+	// ReadStates are linearizable reads confirmed by quorum whose index
+	// is now applied: the caller may serve each against the state machine.
+	ReadStates []ReadState
 }
 
 // ErrNotLeader rejects proposals stepped into a non-leader.
@@ -109,6 +112,11 @@ type Config struct {
 	ElectionTick  int
 	HeartbeatTick int
 	Rand          func(n int) int
+	// LeaseRead serves ReadIndex from a leader lease: after a quorum
+	// heartbeat, reads within the election-timeout window skip the
+	// confirmation round. Faster, but correct only under bounded clock
+	// drift — off by default (strict quorum ReadIndex).
+	LeaseRead bool
 }
 
 // Node is the consensus state machine for one member. Not safe for
@@ -146,6 +154,31 @@ type Node struct {
 	electionElapsed int
 	heartbeatElapse int
 	randomTimeout   int
+
+	// ReadIndex state. pendingReads are read requests awaiting a quorum of
+	// heartbeat confirmations; readAcks counts acks for the in-flight
+	// round. readySeq is the highest read id whose commit index has been
+	// reached and is safe to serve. leaseUntil (lease mode) is the tick
+	// through which we may serve reads without a fresh quorum round.
+	readReady    []ReadState
+	roundReads   []pendingRead
+	pendingReads []pendingRead
+	readAcks     map[uint64]bool
+	leaseAcks    map[uint64]bool
+	leaseElapsed int
+	useLease     bool
+}
+
+// ReadState pairs a read request id with the commit index that must be
+// applied before it is safe to serve.
+type ReadState struct {
+	ID    uint64
+	Index uint64
+}
+
+type pendingRead struct {
+	id    uint64
+	index uint64
 }
 
 // NewNode creates a follower at term 0 with default timing (10-tick
@@ -208,6 +241,8 @@ func newNode(cfg Config, rec Recovered, appliedIndex uint64) *Node {
 		electionTick:  cfg.ElectionTick,
 		heartbeatTick: cfg.HeartbeatTick,
 		rand:          cfg.Rand,
+		readAcks:      map[uint64]bool{},
+		useLease:      cfg.LeaseRead,
 	}
 	n.term = hs.Term
 	n.vote = hs.Vote
@@ -313,6 +348,11 @@ func (n *Node) becomeLeader() {
 	n.role = Leader
 	n.lead = n.id
 	n.heartbeatElapse = 0
+	n.leaseElapsed = 0
+	n.leaseAcks = nil
+	n.roundReads = nil
+	n.pendingReads = nil
+	n.readAcks = map[uint64]bool{}
 	n.next = map[uint64]uint64{}
 	n.match = map[uint64]uint64{}
 	for _, p := range n.peers {
@@ -379,6 +419,7 @@ func (n *Node) send(m Message) {
 // heartbeat (heartbeat content lands with replication in P3.4).
 func (n *Node) Tick() {
 	if n.role == Leader {
+		n.leaseElapsed++
 		n.heartbeatElapse++
 		if n.heartbeatElapse >= n.heartbeatTick {
 			n.heartbeatElapse = 0
@@ -402,8 +443,15 @@ func (n *Node) bcastAppend() {
 }
 
 // bcastHeartbeat is bcastAppend by another name — a heartbeat is just an
-// AppendEntries that usually carries no new entries.
-func (n *Node) bcastHeartbeat() { n.bcastAppend() }
+// AppendEntries that usually carries no new entries. If a ReadIndex round
+// is in flight, it re-arms the round's ack tally so a lost round is retried
+// on the next heartbeat.
+func (n *Node) bcastHeartbeat() {
+	if n.roundActive() {
+		n.readAcks = map[uint64]bool{n.id: true}
+	}
+	n.bcastAppend()
+}
 
 // sendAppend ships AppendEntries to one follower: the consistency-check
 // previous entry at nextIndex-1, then every entry from nextIndex onward,
@@ -521,12 +569,23 @@ func (n *Node) handleAppResp(m Message) {
 		n.sendAppend(m.From)
 		return
 	}
-	if m.LogIndex > n.match[m.From] {
-		n.match[m.From] = m.LogIndex
-		n.next[m.From] = m.LogIndex + 1
-		if n.maybeCommit() {
-			// A new commit index must reach followers promptly.
-			n.bcastAppend()
+	if m.LogIndex >= n.match[m.From] {
+		if m.LogIndex > n.match[m.From] {
+			n.match[m.From] = m.LogIndex
+			n.next[m.From] = m.LogIndex + 1
+			if n.maybeCommit() {
+				// A new commit index must reach followers promptly.
+				n.bcastAppend()
+			}
+		}
+		// Any ack (even a bare heartbeat) renews the lease and confirms
+		// an in-flight ReadIndex round.
+		n.renewLeaseAck(m.From)
+		if n.roundActive() {
+			n.readAcks[m.From] = true
+			if len(n.readAcks) >= n.quorum() {
+				n.confirmReadRound()
+			}
 		}
 	}
 }
@@ -618,6 +677,19 @@ func (n *Node) maybeCommit() bool {
 	return true
 }
 
+// leaseAcks tracks heartbeat acks within the current lease window; a quorum
+// renews the lease.
+func (n *Node) renewLeaseAck(from uint64) {
+	if n.leaseAcks == nil {
+		n.leaseAcks = map[uint64]bool{n.id: true}
+	}
+	n.leaseAcks[from] = true
+	if len(n.leaseAcks) >= n.quorum() {
+		n.leaseElapsed = 0
+		n.leaseAcks = nil
+	}
+}
+
 func (n *Node) hardState() HardState {
 	return HardState{Term: n.term, Vote: n.vote, Commit: n.log.committed}
 }
@@ -630,7 +702,21 @@ func (n *Node) HasReady() bool {
 	if n.log.lastIndex() > n.stabled {
 		return true
 	}
-	return min(n.log.committed, n.stabled) > n.log.applied
+	if min(n.log.committed, n.stabled) > n.log.applied {
+		return true
+	}
+	return len(n.readyReadStates()) > 0
+}
+
+// readyReadStates returns confirmed reads whose index is applied.
+func (n *Node) readyReadStates() []ReadState {
+	var out []ReadState
+	for _, r := range n.readReady {
+		if r.Index <= n.log.applied {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // Ready drains the pending effects. Callers must Advance with the same
@@ -649,6 +735,7 @@ func (n *Node) Ready() Ready {
 	if applyTo := min(n.log.committed, n.stabled); applyTo > n.log.applied {
 		rd.CommittedEntries = append([]Entry(nil), n.log.slice(n.log.applied+1, applyTo+1)...)
 	}
+	rd.ReadStates = n.readyReadStates()
 	return rd
 }
 
@@ -665,6 +752,80 @@ func (n *Node) Advance(rd Ready) {
 	if len(rd.CommittedEntries) > 0 {
 		n.log.appliedTo(rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
 	}
+	if len(rd.ReadStates) > 0 {
+		served := map[uint64]bool{}
+		for _, r := range rd.ReadStates {
+			served[r.ID] = true
+		}
+		kept := n.readReady[:0]
+		for _, r := range n.readReady {
+			if !served[r.ID] {
+				kept = append(kept, r)
+			}
+		}
+		n.readReady = kept
+	}
+}
+
+// ReadIndex requests a linearizable read identified by id. It records the
+// current commit index and confirms leadership (a quorum heartbeat round,
+// or the lease fast path); once confirmed AND that index is applied, the
+// read surfaces in Ready.ReadStates and may be served against the state
+// machine. Returns false (and does nothing) if this node is not the leader
+// or has not yet committed an entry in its term — the caller must redirect.
+func (n *Node) ReadIndex(id uint64) bool {
+	if n.role != Leader {
+		return false
+	}
+	// A leader may only serve reads once it has committed an entry from
+	// its current term (its no-op), proving its commit index is current.
+	if t, ok := n.log.term(n.log.committed); !ok || t != n.term {
+		return false
+	}
+	n.pendingReads = append(n.pendingReads, pendingRead{id: id, index: n.log.committed})
+	n.maybeStartReadRound()
+	return true
+}
+
+// maybeStartReadRound begins a confirmation round for the currently queued
+// reads if none is in flight.
+func (n *Node) maybeStartReadRound() {
+	if n.roundActive() || len(n.pendingReads) == 0 || n.role != Leader {
+		return
+	}
+	n.roundReads = n.pendingReads
+	n.pendingReads = nil
+	n.readAcks = map[uint64]bool{n.id: true}
+	if n.useLease && n.leaseElapsed < n.electionTick {
+		// Lease still valid: a recent quorum heartbeat already proved
+		// leadership, so confirm without a new round.
+		n.confirmReadRound()
+		return
+	}
+	// Confirm by a fresh quorum of AppendEntries acks; a single node is
+	// its own quorum.
+	if len(n.readAcks) >= n.quorum() {
+		n.confirmReadRound()
+		return
+	}
+	n.bcastHeartbeat()
+}
+
+func (n *Node) roundActive() bool { return len(n.roundReads) > 0 }
+
+func (n *Node) confirmReadRound() {
+	n.readReady = append(n.readReady, toReadStates(n.roundReads)...)
+	n.roundReads = nil
+	n.readAcks = map[uint64]bool{}
+	n.maybeStartReadRound() // drain any reads queued during the round
+}
+
+func toReadStates(rs []pendingRead) []ReadState {
+	out := make([]ReadState, len(rs))
+	for i, r := range rs {
+		out[i] = ReadState{ID: r.id, Index: r.index}
+	}
+	return out
 }
 
 // RestoreSnapshot installs a snapshot boundary on a follower that has just
