@@ -33,7 +33,7 @@ func transientRoute(err error) bool {
 	case codes.Unavailable, codes.DeadlineExceeded, codes.Aborted:
 		return true
 	case codes.FailedPrecondition:
-		return strings.HasPrefix(st.Message(), "not-leader:")
+		return strings.HasPrefix(st.Message(), "not-leader:") || strings.HasPrefix(st.Message(), migratingPrefix)
 	default:
 		return false
 	}
@@ -95,6 +95,8 @@ func (sc *shardedCluster) mustDelete(t *testing.T, ctx context.Context, node uin
 type shardedCluster struct {
 	nodes   map[uint64]*Node
 	clients map[uint64]basaltv1.KVServiceClient
+	srvs    map[uint64]*Servers
+	kvAddrs map[uint64]string
 	smap    *shard.ShardMap
 }
 
@@ -112,7 +114,10 @@ func startSharded(t *testing.T, groups []uint64) *shardedCluster {
 		kvLis[id], kvAddr[id] = kl, ka
 	}
 	smap := shard.NewShardMap(groups)
-	sc := &shardedCluster{nodes: map[uint64]*Node{}, clients: map[uint64]basaltv1.KVServiceClient{}, smap: smap}
+	sc := &shardedCluster{
+		nodes: map[uint64]*Node{}, clients: map[uint64]basaltv1.KVServiceClient{},
+		srvs: map[uint64]*Servers{}, kvAddrs: kvAddr, smap: smap,
+	}
 	for _, id := range ids {
 		n, err := Open(Config{
 			ID: id, Peers: peers, DataDir: filepath.Join(t.TempDir(), fmt.Sprintf("n%d", id)),
@@ -123,6 +128,7 @@ func startSharded(t *testing.T, groups []uint64) *shardedCluster {
 		}
 		sc.nodes[id] = n
 		srv := n.ServeSharded(raftLis[id], kvLis[id], smap)
+		sc.srvs[id] = srv
 		t.Cleanup(func() { srv.Raft.Stop(); srv.KV.Stop() })
 	}
 	for _, id := range ids {

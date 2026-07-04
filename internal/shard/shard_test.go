@@ -136,7 +136,7 @@ func FuzzSlotStableAndInRange(f *testing.F) {
 }
 
 func TestMarshalRoundtrip(t *testing.T) {
-	m := NewShardMap([]uint64{7, 8, 9}).WithSlot(3, 99)
+	m := NewShardMap([]uint64{7, 8, 9}).WithSlot(3, 99).WithMigrating(5, true).WithMigrating(200, true)
 	got, err := Unmarshal(m.Marshal())
 	if err != nil {
 		t.Fatal(err)
@@ -148,8 +148,28 @@ func TestMarshalRoundtrip(t *testing.T) {
 		if got.Group(s) != m.Group(s) {
 			t.Fatalf("slot %d = %d, want %d", s, got.Group(s), m.Group(s))
 		}
+		if got.IsMigrating(s) != m.IsMigrating(s) {
+			t.Fatalf("slot %d migrating = %v, want %v", s, got.IsMigrating(s), m.IsMigrating(s))
+		}
+	}
+	if !got.IsMigrating(5) || !got.IsMigrating(200) || got.IsMigrating(6) {
+		t.Fatal("migrating bitset did not round-trip")
 	}
 	if _, err := Unmarshal([]byte{1, 2}); err == nil {
 		t.Fatal("short data must fail")
+	}
+}
+
+func TestWithSlotClearsMigrating(t *testing.T) {
+	m := NewShardMap([]uint64{1, 2}).WithMigrating(4, true)
+	if !m.IsMigrating(4) {
+		t.Fatal("slot 4 should be migrating")
+	}
+	flipped := m.WithSlot(4, 2)
+	if flipped.IsMigrating(4) {
+		t.Fatal("reassigning a slot must clear its migrating flag")
+	}
+	if flipped.Epoch != m.Epoch+1 {
+		t.Fatalf("epoch = %d, want %d", flipped.Epoch, m.Epoch+1)
 	}
 }

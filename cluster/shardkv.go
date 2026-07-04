@@ -15,6 +15,7 @@ import (
 
 	basalt "github.com/LovRanRan/basalt"
 	basaltv1 "github.com/LovRanRan/basalt/api/basalt/v1"
+	"github.com/LovRanRan/basalt/internal/shard"
 )
 
 // routeGIDMD is the gRPC metadata key a forwarding node stamps with the group
@@ -33,6 +34,12 @@ const routeGIDMD = "basalt-route-gid"
 
 // scanBatch is how many pairs one streamed ScanResponse carries.
 const scanBatch = 256
+
+// errSlotMigrating rejects a write to a slot frozen for a handoff. The freeze
+// is cluster-wide, so rotating to another node is useless: the message prefix
+// tells cluster.Client to back off and retry in place until the handoff
+// completes (typically well under a second).
+var errSlotMigrating = status.Error(codes.FailedPrecondition, "slot-migrating: handoff in progress, retry")
 
 // shardKV is the sharded front door. Any node can serve any request: a
 // point op routes to the group owning the key's slot and, if this node does
@@ -106,7 +113,11 @@ func (s *shardKV) Put(ctx context.Context, req *basaltv1.PutRequest) (*basaltv1.
 	if err := validKey(req.GetKey()); err != nil {
 		return nil, err
 	}
-	gid := s.n.ShardMap().Lookup(req.GetKey())
+	m := s.n.ShardMap()
+	if m.IsKeyMigrating(req.GetKey()) {
+		return nil, errSlotMigrating
+	}
+	gid := m.Lookup(req.GetKey())
 	if gid == 0 {
 		return nil, status.Error(codes.FailedPrecondition, "shard: key maps to an unassigned slot")
 	}
@@ -121,18 +132,36 @@ func (s *shardKV) Put(ctx context.Context, req *basaltv1.PutRequest) (*basaltv1.
 		}
 		return nil, status.Errorf(codes.Unavailable, "shard: no leader for group %d", gid)
 	}
-	perr := g.Propose(ctx, s.command(req.GetKey(), req.GetValue(), false))
+	perr := g.ProposeWithGuard(ctx, s.command(req.GetKey(), req.GetValue(), false), s.freezeGuard(req.GetKey()))
 	if perr != nil {
 		return nil, mapErr(perr)
 	}
 	return &basaltv1.PutResponse{}, nil
 }
 
+// freezeGuard re-checks the write freeze on the owning group's event loop
+// right before the entry is appended (see ProposeWithGuard): the front-door
+// check alone would let a request that raced the freeze append after the
+// migration barrier and be missed by the final copy.
+func (s *shardKV) freezeGuard(key []byte) func() error {
+	k := append([]byte(nil), key...)
+	return func() error {
+		if s.n.ShardMap().IsKeyMigrating(k) {
+			return errSlotMigrating
+		}
+		return nil
+	}
+}
+
 func (s *shardKV) Delete(ctx context.Context, req *basaltv1.DeleteRequest) (*basaltv1.DeleteResponse, error) {
 	if err := validKey(req.GetKey()); err != nil {
 		return nil, err
 	}
-	gid := s.n.ShardMap().Lookup(req.GetKey())
+	m := s.n.ShardMap()
+	if m.IsKeyMigrating(req.GetKey()) {
+		return nil, errSlotMigrating
+	}
+	gid := m.Lookup(req.GetKey())
 	if gid == 0 {
 		return nil, status.Error(codes.FailedPrecondition, "shard: key maps to an unassigned slot")
 	}
@@ -146,7 +175,7 @@ func (s *shardKV) Delete(ctx context.Context, req *basaltv1.DeleteRequest) (*bas
 		}
 		return nil, status.Errorf(codes.Unavailable, "shard: no leader for group %d", gid)
 	}
-	if perr := g.Propose(ctx, s.command(req.GetKey(), nil, true)); perr != nil {
+	if perr := g.ProposeWithGuard(ctx, s.command(req.GetKey(), nil, true), s.freezeGuard(req.GetKey())); perr != nil {
 		return nil, mapErr(perr)
 	}
 	return &basaltv1.DeleteResponse{}, nil
@@ -251,13 +280,24 @@ func (s *shardKV) scanGroup(req *basaltv1.ScanRequest, stream basaltv1.KVService
 // locality, so a full scan must touch every group.
 func (s *shardKV) scanAllGroups(req *basaltv1.ScanRequest, stream basaltv1.KVService_ScanServer) error {
 	ctx := stream.Context()
+	smap := s.n.ShardMap()
 	var all []*basaltv1.KeyValue
-	for _, gid := range s.n.ShardMap().Groups() {
+	for _, gid := range smap.Groups() {
 		pairs, err := s.gatherGroup(ctx, gid, req)
 		if err != nil {
 			return err
 		}
-		all = append(all, pairs...)
+		for _, kv := range pairs {
+			// Only the current owner's copy counts. During a migration a
+			// slot's keys transiently live in both the source and destination
+			// groups (copied but not yet flipped, or flipped but not yet
+			// cleaned up); filtering to the owner keeps a key from appearing
+			// twice in the merged result. In steady state this filters
+			// nothing.
+			if smap.Group(shard.Slot(kv.GetKey())) == gid {
+				all = append(all, kv)
+			}
+		}
 	}
 	sort.Slice(all, func(i, j int) bool { return bytes.Compare(all[i].GetKey(), all[j].GetKey()) < 0 })
 	if req.GetLimit() > 0 && uint64(len(all)) > req.GetLimit() {
@@ -331,11 +371,15 @@ func (s *shardKV) gatherLocal(ctx context.Context, gid uint64, req *basaltv1.Sca
 }
 
 // mapErr turns a group error into a client status: a not-leader redirect
-// (leadership changed mid-flight) or Unavailable.
+// (leadership changed mid-flight), the freeze rejection (surfaced verbatim so
+// clients recognize it), or Unavailable.
 func mapErr(err error) error {
 	var nl *ErrNotLeader
 	if errors.As(err, &nl) {
 		return status.Errorf(codes.FailedPrecondition, "not-leader:%d", nl.Leader)
+	}
+	if errors.Is(err, errSlotMigrating) {
+		return err
 	}
 	return status.Error(codes.Unavailable, err.Error())
 }

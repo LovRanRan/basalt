@@ -27,10 +27,15 @@ func Slot(key []byte) uint32 {
 
 // ShardMap is an immutable, versioned assignment of every slot to a group.
 // Epoch increases on each change so stale-routed requests can be fenced
-// (P4.6). A slot with group 0 is unassigned.
+// (P4.6). A slot with group 0 is unassigned. A slot marked migrating is being
+// handed to a new owner: it still routes reads to its current group, but the
+// front door rejects writes to it (retryably) so no write lands after the
+// migration's final copy — the write freeze that makes a slot handoff
+// single-owner-safe (P4.8).
 type ShardMap struct {
-	Epoch uint64
-	slots [NumSlots]uint64 // slot -> group id
+	Epoch     uint64
+	slots     [NumSlots]uint64 // slot -> group id
+	migrating [NumSlots]bool   // slot -> writes frozen for a handoff
 }
 
 // NewShardMap spreads the slots as evenly as possible across the given
@@ -89,15 +94,43 @@ func (m *ShardMap) SlotsFor(group uint64) []uint32 {
 	return out
 }
 
+// IsMigrating reports whether slot is frozen for a handoff.
+func (m *ShardMap) IsMigrating(slot uint32) bool {
+	if slot >= NumSlots {
+		panic(fmt.Sprintf("shard: slot %d out of range", slot))
+	}
+	return m.migrating[slot]
+}
+
+// IsKeyMigrating reports whether a key's slot is frozen for a handoff.
+func (m *ShardMap) IsKeyMigrating(key []byte) bool {
+	return m.migrating[Slot(key)]
+}
+
+// WithMigrating returns a copy that marks slot frozen (or unfrozen) for a
+// handoff, bumping the epoch. Ownership is unchanged, so reads still route to
+// the current group; the front door rejects writes while frozen.
+func (m *ShardMap) WithMigrating(slot uint32, migrating bool) *ShardMap {
+	if slot >= NumSlots {
+		panic(fmt.Sprintf("shard: slot %d out of range", slot))
+	}
+	nm := *m
+	nm.migrating[slot] = migrating
+	nm.Epoch = m.Epoch + 1
+	return &nm
+}
+
 // WithSlot returns a copy with slot reassigned to group and the epoch
-// bumped — the atomic unit of a rebalance (P4.7/P4.8). The receiver is
-// unchanged.
+// bumped — the atomic unit of a rebalance (P4.7/P4.8). Reassigning a slot also
+// clears its migrating flag: the flip to the new owner ends the handoff. The
+// receiver is unchanged.
 func (m *ShardMap) WithSlot(slot uint32, group uint64) *ShardMap {
 	if slot >= NumSlots {
 		panic(fmt.Sprintf("shard: slot %d out of range", slot))
 	}
 	nm := *m
 	nm.slots[slot] = group
+	nm.migrating[slot] = false
 	nm.Epoch = m.Epoch + 1
 	return &nm
 }
@@ -115,14 +148,23 @@ func (m *ShardMap) WithReassign(from, to uint64) *ShardMap {
 	return &nm
 }
 
-// Marshal serializes the map for distribution: epoch then one uvarint group
-// id per slot.
+// migratingBytes is the packed migrating bitset size (one bit per slot).
+const migratingBytes = NumSlots / 8
+
+// Marshal serializes the map for distribution: epoch, one uvarint group id per
+// slot, then a packed migrating bitset (one bit per slot).
 func (m *ShardMap) Marshal() []byte {
 	buf := binary.LittleEndian.AppendUint64(nil, m.Epoch)
 	for _, g := range m.slots {
 		buf = binary.AppendUvarint(buf, g)
 	}
-	return buf
+	var bits [migratingBytes]byte
+	for s := 0; s < NumSlots; s++ {
+		if m.migrating[s] {
+			bits[s/8] |= 1 << (uint(s) % 8)
+		}
+	}
+	return append(buf, bits[:]...)
 }
 
 // Unmarshal parses a marshaled map.
@@ -140,8 +182,13 @@ func Unmarshal(data []byte) (*ShardMap, error) {
 		m.slots[s] = g
 		rest = rest[n:]
 	}
-	if len(rest) != 0 {
-		return nil, fmt.Errorf("shard: %d trailing bytes", len(rest))
+	if len(rest) != migratingBytes {
+		return nil, fmt.Errorf("shard: expected %d migrating-bitset bytes, got %d", migratingBytes, len(rest))
+	}
+	for s := 0; s < NumSlots; s++ {
+		if rest[s/8]&(1<<(uint(s)%8)) != 0 {
+			m.migrating[s] = true
+		}
 	}
 	return m, nil
 }

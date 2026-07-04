@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -13,6 +14,22 @@ import (
 
 	basaltv1 "github.com/LovRanRan/basalt/api/basalt/v1"
 )
+
+// Freeze-retry pacing: a slot mid-handoff rejects writes on EVERY node, so
+// the client backs off in place rather than rotating targets. A handoff is
+// typically sub-second; the cap bounds a stuck one to ~10s before surfacing
+// the retryable error to the caller.
+const (
+	freezeBackoff   = 25 * time.Millisecond
+	maxFreezeWaits  = 400
+	migratingPrefix = "slot-migrating:"
+)
+
+// isMigrating reports the cluster-wide write-freeze rejection.
+func isMigrating(err error) bool {
+	st, ok := status.FromError(err)
+	return ok && st.Code() == codes.FailedPrecondition && strings.HasPrefix(st.Message(), migratingPrefix)
+}
 
 // Client is a cluster-aware KV client: it caches the current leader and,
 // on a not-leader redirect, follows the hint (or round-robins) and retries.
@@ -65,9 +82,12 @@ func leaderHint(err error) (uint64, bool) {
 }
 
 // call retries fn against the cached leader, following redirects, until it
-// succeeds or the hop budget is spent.
+// succeeds or the hop budget is spent. A slot-migrating rejection backs off
+// in place (every node rejects identically during a handoff, so rotating is
+// useless) without spending the hop budget.
 func (c *Client) call(ctx context.Context, fn func(cl basaltv1.KVServiceClient) error) error {
 	target := c.leader
+	freezeWaits := 0
 	for hop := 0; hop < c.maxHops; hop++ {
 		cl, ok := c.conns[target]
 		if !ok {
@@ -78,6 +98,18 @@ func (c *Client) call(ctx context.Context, fn func(cl basaltv1.KVServiceClient) 
 		if err == nil {
 			c.leader = target
 			return nil
+		}
+		if isMigrating(err) {
+			if freezeWaits++; freezeWaits > maxFreezeWaits {
+				return err // still retryable; the caller can back off longer
+			}
+			hop--
+			select {
+			case <-time.After(freezeBackoff):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			continue
 		}
 		if hint, isRedirect := leaderHint(err); isRedirect {
 			// Explicit not-leader: follow the hint, else round-robin.

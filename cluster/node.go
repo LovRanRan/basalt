@@ -51,9 +51,10 @@ type Config struct {
 }
 
 type proposal struct {
-	data []byte
-	key  waiterKey
-	resp chan error
+	data  []byte
+	key   waiterKey
+	guard func() error // runs on the event loop just before append; nil = none
+	resp  chan error
 }
 
 type readReq struct {

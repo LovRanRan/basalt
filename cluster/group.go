@@ -132,6 +132,12 @@ func (g *group) handlePropose(p *proposal) {
 		p.resp <- &ErrNotLeader{Leader: g.raft.Lead()}
 		return
 	}
+	if p.guard != nil {
+		if err := p.guard(); err != nil {
+			p.resp <- err
+			return
+		}
+	}
 	g.waiters[p.key] = p.resp
 	if err := g.raft.Propose(p.data); err != nil {
 		delete(g.waiters, p.key)
@@ -254,7 +260,19 @@ func (g *group) step(m raft.Message) {
 }
 
 func (g *group) Propose(ctx context.Context, cmd *basalt.Command) error {
-	p := &proposal{data: basalt.EncodeCommand(cmd), key: waiterKey{cmd.ClientID, cmd.Seq}, resp: make(chan error, 1)}
+	return g.ProposeWithGuard(ctx, cmd, nil)
+}
+
+// ProposeWithGuard proposes a command with a guard that runs on the group's
+// event loop immediately before the entry is appended, serialized with every
+// other proposal. The sharded front door uses it to enforce the write freeze
+// right up to the append: its front-door map check alone leaves a window
+// where a request that passed before the freeze arrived could append after
+// the migration's barrier and be missed by the final copy. Because the guard
+// runs in loop order, every write either lands before the barrier (and is
+// captured by the copy) or observes the frozen map and is rejected.
+func (g *group) ProposeWithGuard(ctx context.Context, cmd *basalt.Command, guard func() error) error {
+	p := &proposal{data: basalt.EncodeCommand(cmd), key: waiterKey{cmd.ClientID, cmd.Seq}, guard: guard, resp: make(chan error, 1)}
 	select {
 	case g.propc <- p:
 	case <-ctx.Done():
