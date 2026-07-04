@@ -16,8 +16,8 @@ No work happens outside the roadmap without amending it here first.
 | | |
 |---|---|
 | Current phase | **Phase 1 COMPLETE** → Phase 2 — networked single-node server |
-| Next commit | P2.4 — `feat(cli): basalt client with get, put, del, scan, and bench subcommands` |
-| Commits done | 14 / 39 (P1: 11/11 · P2: 3/5 · P3: 0/11 · P4: 0/12) |
+| Next commit | P2.5 — `build(release): dockerfile and end-to-end smoke test wired into ci` |
+| Commits done | 15 / 39 (P1: 11/11 · P2: 4/5 · P3: 0/11 · P4: 0/12) |
 | Blockers | none (P1.9/P1.10 external reviews were skipped due to a session usage limit — a make-up review pass is worth running before Phase 3 builds on the engine) |
 | Last updated | 2026-07-04 |
 
@@ -52,7 +52,7 @@ Goal: embeddable engine package with `Open / Get / Put / Delete / Scan / Close`,
 - [x] **P1.11** `bench(engine): workload harness reporting throughput and p50/p99 latency` — db_bench-style CLI (fillseq/fillrandom/readrandom/readwhilewriting/scan), HDR histograms, engine counters exposing write amplification; go benchmarks for hot paths; reference run in README.
   *Done when: all workloads complete in CI smoke mode emitting throughput and p50/p99.*
 
-### Phase 2 — networked single-node server (3/5)
+### Phase 2 — networked single-node server (4/5)
 
 Goal: Basalt as a real service — gRPC API, CLI client, observability, Docker + CI. *(Design review cut a redundant standalone CI commit; its Makefile folds into P2.1.)*
 
@@ -62,7 +62,7 @@ Goal: Basalt as a real service — gRPC API, CLI client, observability, Docker +
   *Done when: full CRUD + streaming scan pass over bufconn with correct status codes, race-clean.*
 - [x] **P2.3** `feat(cmd): server binary with config, structured logging, and prometheus metrics` — YAML config with flag overrides, slog JSON logging via interceptors, `/metrics` with per-method histograms + engine gauges, graceful SIGTERM drain.
   *Done when: binary starts from config, serves RPCs, exposes populated /metrics, exits cleanly with a recoverable data dir.*
-- [ ] **P2.4** `feat(cli): basalt client with get, put, del, scan, and bench subcommands` — gRPC client CLI, per-call timeouts, distinct exit codes, HDR-histogram bench subcommand.
+- [x] **P2.4** `feat(cli): basalt client with get, put, del, scan, and bench subcommands` — gRPC client CLI, per-call timeouts, distinct exit codes, HDR-histogram bench subcommand.
   *Done when: all subcommands work against a live server; CLI tests green in CI.*
 - [ ] **P2.5** `build(release): dockerfile and end-to-end smoke test wired into ci` — multi-stage distroless image; e2e test drives the real CLI against a real server including kill + restart WAL recovery.
   *Done when: CI builds the image and the e2e job passes, incl. data surviving server kill/restart.*
@@ -128,6 +128,8 @@ Goal: multi-raft sharding, live rebalance, one real fault/chaos harness, benchma
 ## Logs
 
 *Newest first. Every entry: date · commit · what landed · decisions/numbers.*
+
+- **2026-07-04** · **P2.4** `feat(cli): basalt client with get, put, del, scan, and bench subcommands` · `cmd/basalt`: get (-hex) / put / del / scan (-start/-end/-limit, TAB-separated) / bench (read-ratio mix, percentiles); global -addr/-timeout; distinct exit codes (0 ok, 1 error, 2 usage, 3 not-found — server InvalidArgument surfaces as usage). `cliMain(args, stdout, stderr) int` keeps it fully testable against a real TCP server. `.golangci.yml` added: errcheck excludes `fmt.Fprint*` — unactionable print errors are noise. Race-clean.
 
 - **2026-07-04** · **P2.3** `feat(cmd): server binary with config, structured logging, and prometheus metrics` · `cmd/basalt-server`: YAML config with strict unknown-field rejection, precedence flags > file > defaults; slog JSON via unary+stream interceptors (method/code/duration); Prometheus registry with per-method counters + latency histograms and engine gauges off `DB.Metrics()`; graceful SIGTERM: GracefulStop drains in-flight RPCs, engine Close syncs the WAL. Tested in-process via a `ready` hook on ephemeral ports: RPCs over the wire, /metrics populated, clean shutdown, data dir reopens with data intact. Deps: prometheus client_golang, yaml.v3.
 

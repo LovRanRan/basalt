@@ -1,0 +1,10 @@
+version: "2"
+linters:
+  settings:
+    errcheck:
+      # CLI/report output to an io.Writer: a failed print has no meaningful
+      # recovery and checking it everywhere is pure noise.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
