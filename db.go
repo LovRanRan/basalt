@@ -29,6 +29,14 @@ var ErrBatchTooLarge = errors.New("basalt: batch exceeds max WAL record size")
 // ErrClosed reports an operation on a closed database.
 var ErrClosed = errors.New("basalt: db is closed")
 
+// reservedPrefix marks engine-internal keys (raft applied index, dedup
+// sessions). User writes and reads may not touch them, and iterators skip
+// them.
+var reservedPrefix = []byte("\x00!raft/")
+
+// ErrReservedKey rejects user access to the engine-internal key space.
+var ErrReservedKey = errors.New("basalt: key is in the reserved range")
+
 type Options struct {
 	// MemTableSize is the write-buffer size that triggers a flush to L0.
 	// Defaults to 4 MiB.
@@ -48,6 +56,12 @@ type Options struct {
 	// only): a crash may lose recent acknowledged writes — never ordering
 	// or integrity. For tests and benchmarks.
 	DisableWALSync bool
+	// DisableWAL turns the engine WAL off entirely: acknowledged writes
+	// are durable only once flushed. For use under raft, where the raft
+	// log is the sole durability source and double-logging every entry
+	// would be waste. Opening a WAL-ful directory with DisableWAL fails
+	// if undrained records remain.
+	DisableWAL bool
 }
 
 func (o *Options) defaults() {
@@ -180,6 +194,9 @@ func Open(dir string, opts Options) (*DB, error) {
 	}
 	maxSeq := vs.LastSeq()
 	err = wal.Replay(walDir, func(payload []byte) error {
+		if opts.DisableWAL {
+			return errors.New("basalt: wal contains data but DisableWAL is set; open once with the WAL enabled and Close cleanly to drain")
+		}
 		b, err := wal.DecodeBatch(payload)
 		if err != nil {
 			return err
@@ -199,12 +216,14 @@ func Open(dir string, opts Options) (*DB, error) {
 	db.seq.Store(maxSeq)
 	vs.AdvanceLastSeq(maxSeq)
 
-	syncPolicy := wal.SyncEveryRecord
-	if opts.DisableWALSync {
-		syncPolicy = wal.SyncManual
-	}
-	if db.wal, err = wal.OpenWriter(wal.Options{Dir: walDir, Sync: syncPolicy}); err != nil {
-		return nil, err
+	if !opts.DisableWAL {
+		syncPolicy := wal.SyncEveryRecord
+		if opts.DisableWALSync {
+			syncPolicy = wal.SyncManual
+		}
+		if db.wal, err = wal.OpenWriter(wal.Options{Dir: walDir, Sync: syncPolicy}); err != nil {
+			return nil, err
+		}
 	}
 	db.mu.Lock()
 	db.maybeScheduleCompactionLocked()
@@ -308,19 +327,32 @@ func (db *DB) openTable(meta manifest.FileMeta) (*tableHandle, error) {
 func (db *DB) Put(key, value []byte) error {
 	var b wal.Batch
 	b.Put(key, value)
-	return db.write(&b)
+	return db.write(&b, false)
 }
 
 func (db *DB) Delete(key []byte) error {
 	var b wal.Batch
 	b.Delete(key)
-	return db.write(&b)
+	return db.write(&b, false)
+}
+
+// applyRaft commits a batch that may write reserved keys; only the raft
+// state machine calls it.
+func (db *DB) applyRaft(b *wal.Batch) error {
+	return db.write(b, true)
 }
 
 // write commits one batch: WAL append (synced), memtable apply under
 // consecutive seqnos, then seq publication. A write error poisons the
 // engine — the WAL contract after a failed append is reopen-to-recover.
-func (db *DB) write(b *wal.Batch) error {
+func (db *DB) write(b *wal.Batch, allowReserved bool) error {
+	if !allowReserved {
+		for _, op := range b.Ops {
+			if bytes.HasPrefix(op.UserKey, reservedPrefix) {
+				return fmt.Errorf("%w: %q", ErrReservedKey, op.UserKey)
+			}
+		}
+	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	switch {
@@ -334,14 +366,16 @@ func (db *DB) write(b *wal.Batch) error {
 	}
 	prev := db.seq.Load()
 	b.BaseSeq = prev + 1
-	db.encBuf = b.Encode(db.encBuf[:0])
-	if _, err := db.wal.Append(db.encBuf); err != nil {
-		if errors.Is(err, wal.ErrRecordTooLarge) {
-			// Nothing was written; the engine stays healthy.
-			return fmt.Errorf("%w: %v", ErrBatchTooLarge, err)
+	if db.wal != nil {
+		db.encBuf = b.Encode(db.encBuf[:0])
+		if _, err := db.wal.Append(db.encBuf); err != nil {
+			if errors.Is(err, wal.ErrRecordTooLarge) {
+				// Nothing was written; the engine stays healthy.
+				return fmt.Errorf("%w: %v", ErrBatchTooLarge, err)
+			}
+			db.bgErr = fmt.Errorf("basalt: wal append: %w", err)
+			return db.bgErr
 		}
-		db.bgErr = fmt.Errorf("basalt: wal append: %w", err)
-		return db.bgErr
 	}
 	for i, op := range b.Ops {
 		db.rs.mem.Add(op.UserKey, b.BaseSeq+uint64(i), op.Kind, op.Value)
@@ -386,15 +420,18 @@ func (db *DB) makeRoomLocked() error {
 // readers keep their pinned view — and rotates the WAL so that every
 // segment before the rotation holds only sealed-or-flushed data.
 func (db *DB) sealLocked() error {
-	if err := db.wal.Rotate(); err != nil {
-		db.bgErr = fmt.Errorf("basalt: wal rotate: %w", err)
-		return db.bgErr
+	db.immBound = 0
+	if db.wal != nil {
+		if err := db.wal.Rotate(); err != nil {
+			db.bgErr = fmt.Errorf("basalt: wal rotate: %w", err)
+			return db.bgErr
+		}
+		db.immBound = db.wal.SegmentID()
 	}
 	old := db.rs
 	db.rs = newReadState(memtable.New(), old.mem, old.levels)
 	old.release()
 	db.immSeq = db.seq.Load()
-	db.immBound = db.wal.SegmentID()
 	return nil
 }
 
@@ -476,7 +513,10 @@ func (db *DB) flushImm() {
 	db.cond.Broadcast()
 	db.mu.Unlock()
 
-	pruneErr := wal.DeleteSegmentsBelow(filepath.Join(db.dir, "wal"), bound)
+	var pruneErr error
+	if db.wal != nil {
+		pruneErr = wal.DeleteSegmentsBelow(filepath.Join(db.dir, "wal"), bound)
+	}
 
 	db.mu.Lock()
 	if pruneErr != nil && db.bgErr == nil {
@@ -540,6 +580,15 @@ func (db *DB) writeTable(num uint64, mt *memtable.MemTable) (manifest.FileMeta, 
 // version visible at the acquired sequence snapshot, layer by layer; Get
 // merely short-circuits at the first layer that knows the key.
 func (db *DB) Get(key []byte) ([]byte, error) {
+	if bytes.HasPrefix(key, reservedPrefix) {
+		return nil, fmt.Errorf("%w: %q", ErrReservedKey, key)
+	}
+	return db.get(key)
+}
+
+// get serves reads without the reserved-range guard; the raft state
+// machine reads its bookkeeping through it.
+func (db *DB) get(key []byte) ([]byte, error) {
 	rs, seq, err := db.acquire()
 	if err != nil {
 		return nil, err
@@ -636,8 +685,10 @@ func (db *DB) Close() error {
 	}
 	db.mu.Unlock()
 
-	if err := db.wal.Close(); err != nil && firstErr == nil {
-		firstErr = err
+	if db.wal != nil {
+		if err := db.wal.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	if err := db.vs.Close(); err != nil && firstErr == nil {
 		firstErr = err

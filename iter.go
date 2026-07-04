@@ -71,19 +71,31 @@ func (db *DB) acquire() (*readState, uint64, error) {
 // live iterator's table reads fail once the DB closes), and must check
 // Error whenever the iterator goes invalid. Not safe for concurrent use.
 type Iterator struct {
-	rs     *readState
-	m      *mergingIter
-	seq    uint64
-	end    []byte
-	ukBuf  []byte
-	err    error
-	valid  bool
-	closed bool
+	rs              *readState
+	m               *mergingIter
+	seq             uint64
+	end             []byte
+	ukBuf           []byte
+	err             error
+	valid           bool
+	closed          bool
+	includeReserved bool
 }
 
 // Scan returns an iterator over [start, end); a nil start begins at the
-// first key, a nil end runs to the last.
+// first key, a nil end runs to the last. Keys in the engine-reserved range
+// are invisible to it.
 func (db *DB) Scan(start, end []byte) *Iterator {
+	return db.scan(start, end, false)
+}
+
+// scanAll includes reserved keys; the raft state machine rebuilds its
+// session table through it.
+func (db *DB) scanAll(start, end []byte) *Iterator {
+	return db.scan(start, end, true)
+}
+
+func (db *DB) scan(start, end []byte, includeReserved bool) *Iterator {
 	rs, seq, err := db.acquire()
 	if err != nil {
 		return &Iterator{err: err, closed: true}
@@ -98,7 +110,7 @@ func (db *DB) Scan(start, end []byte) *Iterator {
 			children = append(children, h.r.NewIterator())
 		}
 	}
-	it := &Iterator{rs: rs, m: newMergingIter(children), seq: seq}
+	it := &Iterator{rs: rs, m: newMergingIter(children), seq: seq, includeReserved: includeReserved}
 	if end != nil {
 		// Preserve non-nil-ness: a non-nil EMPTY end is the empty range
 		// (every key is >= ""), not an unbounded scan.
@@ -128,6 +140,10 @@ func (it *Iterator) findNext() {
 		}
 		if ik.Seq > it.seq {
 			it.m.Next() // version newer than the snapshot
+			continue
+		}
+		if !it.includeReserved && bytes.HasPrefix(ik.UserKey, reservedPrefix) {
+			it.skipUserKey(ik.UserKey)
 			continue
 		}
 		// Versions of one user key are adjacent, newest first: the first

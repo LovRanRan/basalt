@@ -22,5 +22,5 @@ func (db *DB) Apply(b *Batch) error {
 	if b.Len() == 0 {
 		return nil
 	}
-	return db.write(&b.inner)
+	return db.write(&b.inner, false)
 }
