@@ -333,15 +333,43 @@ func (n *Node) Tick() {
 	}
 }
 
-// bcastHeartbeat sends empty AppendEntries; P3.4 fills in per-follower
-// consistency fields.
-func (n *Node) bcastHeartbeat() {
+// bcastAppend sends each follower the entries after its nextIndex.
+func (n *Node) bcastAppend() {
 	for _, p := range n.peers {
-		if p == n.id {
-			continue
+		if p != n.id {
+			n.sendAppend(p)
 		}
-		n.send(Message{Type: MsgApp, To: p, Commit: min(n.log.committed, n.match[p])})
 	}
+}
+
+// bcastHeartbeat is bcastAppend by another name — a heartbeat is just an
+// AppendEntries that usually carries no new entries.
+func (n *Node) bcastHeartbeat() { n.bcastAppend() }
+
+// sendAppend ships AppendEntries to one follower: the consistency-check
+// previous entry at nextIndex-1, then every entry from nextIndex onward,
+// with the commit index piggybacked (capped at what the follower is known
+// to have, so it never commits an entry it lacks).
+func (n *Node) sendAppend(to uint64) {
+	next := n.next[to]
+	prevIndex := next - 1
+	prevTerm, ok := n.log.term(prevIndex)
+	if !ok {
+		// The follower is behind the log's first index; InstallSnapshot
+		// (P3.8) handles this. Until then, retreat to what we have.
+		prevIndex = n.log.firstIndex() - 1
+		prevTerm, _ = n.log.term(prevIndex)
+		next = prevIndex + 1
+	}
+	ents := append([]Entry(nil), n.log.slice(next, n.log.lastIndex()+1)...)
+	n.send(Message{
+		Type:     MsgApp,
+		To:       to,
+		LogIndex: prevIndex,
+		LogTerm:  prevTerm,
+		Entries:  ents,
+		Commit:   min(n.log.committed, prevIndex+uint64(len(ents))),
+	})
 }
 
 // Step feeds one message into the state machine.
@@ -385,19 +413,56 @@ func (n *Node) Step(m Message) error {
 		n.handleVoteResp(m)
 	case MsgApp:
 		n.handleApp(m)
+	case MsgAppResp:
+		n.handleAppResp(m)
 	}
 	return nil
 }
 
-// handleApp handles same-term AppendEntries. P3.2 needs only the
-// leadership-recognition half — a candidate steps down, any node adopts the
-// sender as leader and resets its election timer; P3.4 adds the log
-// consistency check and replication.
+// handleApp processes AppendEntries: adopt the sender as leader, run the
+// log consistency check, append (truncating conflicts), advance commit, and
+// reply with the new match index — or reject with a conflict hint for fast
+// backup.
 func (n *Node) handleApp(m Message) {
 	n.role = Follower
 	n.lead = m.From
 	n.resetElectionTimer()
-	n.log.commitTo(min(m.Commit, n.log.lastIndex()))
+
+	lastNew, ok := n.log.maybeAppend(m.LogIndex, m.LogTerm, m.Commit, m.Entries)
+	if !ok {
+		// Reject with a hint so the leader backs up by terms, not one
+		// index at a time: point it at the first index we could match.
+		hint := n.log.lastIndex() + 1
+		if m.LogIndex < hint {
+			hint = m.LogIndex
+		}
+		n.send(Message{Type: MsgAppResp, To: m.From, Reject: true, LogIndex: hint})
+		return
+	}
+	n.send(Message{Type: MsgAppResp, To: m.From, LogIndex: lastNew})
+}
+
+// handleAppResp advances a follower's match/next on success (and re-sends if
+// more remains), or backs its nextIndex up to the hint on rejection.
+func (n *Node) handleAppResp(m Message) {
+	if n.role != Leader {
+		return
+	}
+	if m.Reject {
+		if m.LogIndex < n.next[m.From] {
+			n.next[m.From] = max(m.LogIndex, 1)
+		}
+		n.sendAppend(m.From)
+		return
+	}
+	if m.LogIndex > n.match[m.From] {
+		n.match[m.From] = m.LogIndex
+		n.next[m.From] = m.LogIndex + 1
+		if n.maybeCommit() {
+			// A new commit index must reach followers promptly.
+			n.bcastAppend()
+		}
+	}
 }
 
 // handlePreVote grants a pre-vote when the probe term is ahead of ours and
@@ -454,6 +519,7 @@ func (n *Node) handlePropose(m Message) error {
 	}
 	n.log.append(ents...)
 	n.maybeCommit()
+	n.bcastAppend() // replicate promptly, not on the next heartbeat
 	return nil
 }
 
