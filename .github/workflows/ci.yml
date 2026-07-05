@@ -50,7 +50,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test -tags chaos -run 'TestLeaderKillSmoke|TestFault' -count=1 -timeout 600s -p 1 ./cluster/
+      - run: go test -tags chaos -run 'TestLeaderKillSmoke|TestFault|TestChaosRunner' -count=1 -timeout 600s -p 1 ./cluster/
 
   docker:
     runs-on: ubuntu-latest
