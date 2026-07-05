@@ -1,21 +1,53 @@
 # Basalt
 
-Distributed key-value store in Go — from-scratch LSM-tree storage engine (WAL, memtable, SSTables, leveled compaction) with Raft-replicated shards over gRPC.
+A distributed, replicated, linearizable key-value store in Go — a from-scratch
+LSM storage engine, a from-scratch Raft implementation, and hash-slot sharding
+with live rebalancing, all over gRPC. No third-party storage or consensus
+library; the interesting parts are hand-written and heavily tested.
 
 > Basalt: molten writes cool into hard, ordered, layered stone.
 
-## Status
+## What it is
 
-**Phase 1 complete** — the single-node storage engine is done and crash-safe on every tested path:
+- **Storage engine** — a hand-written LSM tree: crc-framed WAL with torn-tail
+  recovery, lock-free-read skiplist memtable, block-based SSTables (prefix
+  compression, bloom filters, checksums), background leveled compaction, a
+  crash-safe version-edit manifest, snapshot reads, atomic batches, and
+  hard-linked checkpoints.
+- **Consensus** — a hand-written Raft with a pure deterministic core:
+  election + PreVote, log replication, persistence, log compaction and
+  streamed snapshot install, ReadIndex linearizable reads, leadership
+  transfer, and single-server membership changes.
+- **Distribution** — multi-raft (many groups per process over one connection
+  per peer), 256 hash slots mapped to groups by an epoch-versioned shard map,
+  a front door that routes/forwards any request to the owning leader, and
+  scatter-gather scans.
+- **Rebalancing** — online per-slot migration: freeze → barrier → copy → flip
+  → cleanup, single-owner-safe across the handoff.
+- **Hardening** — fault injection (leader kill, network partition, slow disk)
+  and a seeded chaos runner that checks read-after-ack visibility and
+  no-lost-writes through the chaos.
 
-- hand-written LSM tree: crc-framed WAL with torn-tail recovery, lock-free-read skiplist memtable, block-based SSTables (prefix compression, bloom filters, checksummed everything), background leveled compaction with tombstone GC
-- crash-safe manifest: version-edit log, atomic `CURRENT` swaps, orphan collection — injected crash points at every rotation step recover consistently
-- snapshot reads: refcounted read views pin their files across flushes and compactions; `Scan` never sees a torn batch or a post-snapshot write
-- atomic `Batch`, hard-linked `Checkpoint` (a checkpoint is itself a complete database), process-exclusive locking
+The commit-level roadmap, live status, and full work log are in
+[progress.md](progress.md). Design details are in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); benchmark numbers and how to
+reproduce them are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-Next: gRPC server + CLI (Phase 2), hand-written Raft replication (Phase 3), multi-raft sharding (Phase 4). Commit-level roadmap, live status, and the work log live in [progress.md](progress.md) — the single source of truth for project progression.
+## Architecture at a glance
 
-## Usage
+```
+ cluster.Client ── gRPC ──►  shardKV front door  ──►  raft group  ──►  LSM engine
+ (leader cache,             (slot = crc32c(key)     (election, log,   (WAL, memtable,
+  redirects, freeze          %256 → ShardMap →       snapshots,        SSTables,
+  back-off)                  owning group leader)     ReadIndex)        compaction)
+```
+
+Any node serves any key: it routes by the shard map to the owning group's
+leader, forwarding when it isn't the leader itself. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the write/read/rebalance
+flows and the testing strategy.
+
+## Using the engine
 
 ```go
 db, err := basalt.Open("/tmp/demo", basalt.Options{})
@@ -40,21 +72,43 @@ it.Close()
 _ = db.Checkpoint("/tmp/demo-backup") // hard-linked, point-in-time, instantly openable
 ```
 
+## Running a cluster
+
+```sh
+make cluster-up   # boots a local 3-node / 3-group cluster from examples/cluster.yaml
+
+# talk to it with the CLI
+go run ./cmd/basalt -addr 127.0.0.1:9101 put user:1 alice
+go run ./cmd/basalt -addr 127.0.0.1:9101 get user:1
+
+# or benchmark it
+go run ./cmd/basalt-ycsb -cluster 1=127.0.0.1:9101,2=127.0.0.1:9102,3=127.0.0.1:9103 -workload a
+```
+
+Commands: `basalt` (CLI), `basalt-server` (single-node gRPC server with a YAML
+config, structured logging, Prometheus metrics), `basalt-cluster` (a cluster
+member), `basalt-bench` (engine db_bench), `basalt-ycsb` (YCSB A–F).
+
 ## Benchmarks
 
-Reference run on an Apple M-series laptop (Go 1.26, `-sync=false`; a synced WAL is bounded by F_FULLFSYNC on macOS at roughly one flush per write):
+Reference run on an Apple M-series laptop (full tables in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
 
+- **Engine**: fillrandom 290 k ops/s, readrandom 596 k ops/s; YCSB read-only
+  542 k ops/s, update-heavy 319 k ops/s (100 B values, `-sync=false`).
+- **Cluster** (3 nodes, linearizable, Raft per write): YCSB read-heavy ~997
+  ops/s, update-heavy ~216 ops/s — the honest cost of quorum replication and
+  per-write persistence.
+
+## Development
+
+```sh
+make build   # go build ./...
+make test    # go test -race ./...
+make lint    # golangci-lint
+make vet
 ```
-$ go run ./cmd/basalt-bench
-basalt-bench: n=200000 value=100B sync=false concurrency=4
-fillseq             200000 ops in    0.64s     313814 ops/s  p50=1.6µs   p95=3.5µs   p99=5.4µs
-fillrandom          200000 ops in    0.69s     290535 ops/s  p50=1.8µs   p95=3.5µs   p99=5.5µs
-readrandom          200000 ops in    0.34s     595929 ops/s  p50=3.3µs   p95=26µs    p99=81µs
-readwhilewriting    200000 ops in    8.80s      22725 ops/s  p50=38.5µs  p95=584µs   p99=2.85ms
-scan                 5.97M keys/s over 10 full scans
-engine: flushes=106 compactions=86 flushed=260.9MB compacted=618.3MB
-```
 
-Hot paths (`go test -bench . ./...`): skiplist insert 338ns, memtable get 248ns, sstable point get 1.03µs, sstable iterator next 28.5ns, 4-way merge next 13ns.
-
-CI runs `basalt-bench -smoke` on every push so the harness itself cannot rot.
+CI runs test / lint / proto-drift / e2e / chaos / docker on every push,
+including `basalt-bench -smoke`, `basalt-ycsb` smoke, and a chaos-tagged suite
+(leader kill, fault injection, the seeded chaos runner).
