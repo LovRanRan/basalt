@@ -94,8 +94,10 @@ func waitValue(t *testing.T, k *killable, id uint64, key, val string, d time.Dur
 		k.mu.Lock()
 		n := k.nodes[id]
 		k.mu.Unlock()
-		if v, err := n.DB().Get([]byte(key)); err == nil && string(v) == val {
-			return
+		if db := n.DB(); db != nil {
+			if v, err := db.Get([]byte(key)); err == nil && string(v) == val {
+				return
+			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -171,7 +173,11 @@ func TestFaultMinorityPartitionedLeader(t *testing.T) {
 		t.Fatalf("old leader never advanced past its partition-era term %d", oldTerm)
 	}
 	for _, id := range ids {
-		if _, err := k.nodes[id].DB().Get([]byte("orphan")); !errors.Is(err, basalt.ErrNotFound) {
+		db := k.nodes[id].DB()
+		if db == nil {
+			t.Fatalf("node %d group offline at quiescence", id)
+		}
+		if _, err := db.Get([]byte("orphan")); !errors.Is(err, basalt.ErrNotFound) {
 			t.Fatalf("node %d holds the isolated leader's uncommitted write: %v", id, err)
 		}
 	}
@@ -266,7 +272,7 @@ func TestFaultSlowDiskFollower(t *testing.T) {
 		if target == slow {
 			target = ids[1]
 		}
-		if err := k.nodes[lead].only().TransferLeader(ctx, target); err != nil {
+		if err := k.nodes[lead].Group(1).TransferLeader(ctx, target); err != nil {
 			cancel()
 			t.Fatalf("transfer off slow node: %v", err)
 		}

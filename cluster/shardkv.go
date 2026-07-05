@@ -55,7 +55,10 @@ type shardKV struct {
 }
 
 func newShardKV(n *Node) *shardKV {
-	return &shardKV{n: n, client: n.cfg.ID}
+	// No-dedup namespace for the same reason as newKVServer: idempotent
+	// single-batch commands, and an in-memory seq that resets on restart must
+	// never collide with a persisted dedup session.
+	return &shardKV{n: n, client: basalt.NoDedupClient | n.cfg.ID}
 }
 
 // fenceRoute rejects a forwarded request when the forwarder and this node

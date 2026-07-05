@@ -247,7 +247,8 @@ var KVService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	RaftService_Step_FullMethodName = "/basalt.v1.RaftService/Step"
+	RaftService_Step_FullMethodName            = "/basalt.v1.RaftService/Step"
+	RaftService_InstallSnapshot_FullMethodName = "/basalt.v1.RaftService/InstallSnapshot"
 )
 
 // RaftServiceClient is the client API for RaftService service.
@@ -259,6 +260,9 @@ const (
 // (raft tolerates dropped, duplicated, and reordered messages).
 type RaftServiceClient interface {
 	Step(ctx context.Context, in *StepRequest, opts ...grpc.CallOption) (*StepResponse, error)
+	// InstallSnapshot streams a leader's engine checkpoint to a follower whose
+	// next entry has been compacted away, so it can rejoin from the boundary.
+	InstallSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[InstallSnapshotRequest, InstallSnapshotResponse], error)
 }
 
 type raftServiceClient struct {
@@ -279,6 +283,19 @@ func (c *raftServiceClient) Step(ctx context.Context, in *StepRequest, opts ...g
 	return out, nil
 }
 
+func (c *raftServiceClient) InstallSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[InstallSnapshotRequest, InstallSnapshotResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &RaftService_ServiceDesc.Streams[0], RaftService_InstallSnapshot_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[InstallSnapshotRequest, InstallSnapshotResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RaftService_InstallSnapshotClient = grpc.ClientStreamingClient[InstallSnapshotRequest, InstallSnapshotResponse]
+
 // RaftServiceServer is the server API for RaftService service.
 // All implementations must embed UnimplementedRaftServiceServer
 // for forward compatibility.
@@ -288,6 +305,9 @@ func (c *raftServiceClient) Step(ctx context.Context, in *StepRequest, opts ...g
 // (raft tolerates dropped, duplicated, and reordered messages).
 type RaftServiceServer interface {
 	Step(context.Context, *StepRequest) (*StepResponse, error)
+	// InstallSnapshot streams a leader's engine checkpoint to a follower whose
+	// next entry has been compacted away, so it can rejoin from the boundary.
+	InstallSnapshot(grpc.ClientStreamingServer[InstallSnapshotRequest, InstallSnapshotResponse]) error
 	mustEmbedUnimplementedRaftServiceServer()
 }
 
@@ -300,6 +320,9 @@ type UnimplementedRaftServiceServer struct{}
 
 func (UnimplementedRaftServiceServer) Step(context.Context, *StepRequest) (*StepResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Step not implemented")
+}
+func (UnimplementedRaftServiceServer) InstallSnapshot(grpc.ClientStreamingServer[InstallSnapshotRequest, InstallSnapshotResponse]) error {
+	return status.Error(codes.Unimplemented, "method InstallSnapshot not implemented")
 }
 func (UnimplementedRaftServiceServer) mustEmbedUnimplementedRaftServiceServer() {}
 func (UnimplementedRaftServiceServer) testEmbeddedByValue()                     {}
@@ -340,6 +363,13 @@ func _RaftService_Step_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RaftService_InstallSnapshot_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(RaftServiceServer).InstallSnapshot(&grpc.GenericServerStream[InstallSnapshotRequest, InstallSnapshotResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RaftService_InstallSnapshotServer = grpc.ClientStreamingServer[InstallSnapshotRequest, InstallSnapshotResponse]
+
 // RaftService_ServiceDesc is the grpc.ServiceDesc for RaftService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -352,7 +382,13 @@ var RaftService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _RaftService_Step_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "InstallSnapshot",
+			Handler:       _RaftService_InstallSnapshot_Handler,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "basalt/v1/kv.proto",
 }
 

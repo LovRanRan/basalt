@@ -38,6 +38,7 @@ type group struct {
 	db            *basalt.DB
 	sm            *basalt.StateMachine
 	send          sender
+	sendSnap      sender // ships MsgSnap via the out-of-band transfer; may be nil
 	tickInterval  time.Duration
 	snapshotEvery uint64
 	fsyncDelay    time.Duration // fault injection: stall persistence (slow disk)
@@ -63,7 +64,7 @@ type group struct {
 
 // openGroup recovers a group's engine and raft state under dataDir (already
 // namespaced by group id) and launches its loop.
-func openGroup(id, localID uint64, peers []uint64, dataDir string, electionTick, heartbeatTick int, tick time.Duration, snapEvery uint64, fsyncDelay time.Duration, snd sender) (*group, error) {
+func openGroup(id, localID uint64, peers []uint64, dataDir string, electionTick, heartbeatTick int, tick time.Duration, snapEvery uint64, fsyncDelay time.Duration, snd, snapSnd sender) (*group, error) {
 	db, err := basalt.Open(filepath.Join(dataDir, "db"), basalt.Options{DisableWAL: true})
 	if err != nil {
 		return nil, err
@@ -88,7 +89,7 @@ func openGroup(id, localID uint64, peers []uint64, dataDir string, electionTick,
 	}, rec, sm.AppliedIndex())
 
 	g := &group{
-		id: id, raft: rn, st: st, db: db, sm: sm, send: snd,
+		id: id, raft: rn, st: st, db: db, sm: sm, send: snd, sendSnap: snapSnd,
 		tickInterval: tick, snapshotEvery: snapEvery, fsyncDelay: fsyncDelay, dataDir: dataDir,
 		recvc:   make(chan raft.Message, 256),
 		propc:   make(chan *proposal),
@@ -190,7 +191,12 @@ func (g *group) drainReady() {
 		}
 		for _, m := range rd.Messages {
 			if m.Type == raft.MsgSnap {
-				continue // out-of-band transfer not wired into the RPC path
+				// Snapshots move out of band: a checkpoint stream, not a
+				// log message. The node throttles and runs the transfer.
+				if g.sendSnap != nil {
+					g.sendSnap(g.id, m)
+				}
+				continue
 			}
 			g.send(g.id, m)
 		}

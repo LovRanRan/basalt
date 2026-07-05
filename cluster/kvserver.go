@@ -19,12 +19,18 @@ import (
 type kvServer struct {
 	basaltv1.UnimplementedKVServiceServer
 	n   *Node
-	clk uint64        // this node's client-id namespace for its own proposals
+	clk uint64        // this node's proposal namespace (see newKVServer)
 	seq atomic.Uint64 // per-node proposal sequence
 }
 
 func newKVServer(n *Node) *kvServer {
-	return &kvServer{n: n, clk: n.cfg.ID}
+	// Front-door commands ride the engine's no-dedup namespace: each RPC is
+	// one self-contained, idempotent batch (a retry re-proposes the same
+	// bytes), and a persisted dedup session would be actively harmful — this
+	// in-memory seq counter resets on restart, so a rebooted node's proposals
+	// would be silently suppressed by its own pre-restart session while still
+	// acknowledged. Session dedup is reserved for client-supplied request ids.
+	return &kvServer{n: n, clk: basalt.NoDedupClient | n.cfg.ID}
 }
 
 // redirect maps an ErrNotLeader to a gRPC status the client can act on: the
@@ -93,7 +99,11 @@ func (s *kvServer) Get(ctx context.Context, req *basaltv1.GetRequest) (*basaltv1
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
-	v, gerr := s.n.DB().Get(req.GetKey())
+	db := s.n.DB()
+	if db == nil { // group swapped offline (snapshot install) mid-request
+		return nil, status.Error(codes.Unavailable, "group briefly offline, retry")
+	}
+	v, gerr := db.Get(req.GetKey())
 	if errors.Is(gerr, basalt.ErrNotFound) {
 		return &basaltv1.GetResponse{Found: false}, nil
 	}

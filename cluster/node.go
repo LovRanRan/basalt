@@ -9,6 +9,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -99,6 +100,10 @@ type Node struct {
 	// returns true — the fault-injection seam the chaos suites use to
 	// simulate network partitions. Never set in production.
 	raftDrop atomic.Pointer[func(peer uint64) bool]
+
+	// snapInFlight throttles snapshot transfers: one per (group, follower)
+	// at a time. Guarded by mu.
+	snapInFlight map[snapKey]bool
 }
 
 // setRaftDrop installs (or, with nil, clears) the partition filter.
@@ -153,7 +158,7 @@ func Open(cfg Config) (*Node, error) {
 	}
 	for _, gid := range cfg.Groups {
 		g, err := openGroup(gid, cfg.ID, peerIDs, n.groupDir(gid),
-			cfg.ElectionTick, cfg.HeartbeatTick, cfg.TickInterval, cfg.SnapshotEvery, cfg.fsyncDelay, n.sendTo)
+			cfg.ElectionTick, cfg.HeartbeatTick, cfg.TickInterval, cfg.SnapshotEvery, cfg.fsyncDelay, n.sendTo, n.sendSnapshot)
 		if err != nil {
 			n.closeGroups()
 			n.closeConns()
@@ -268,7 +273,7 @@ func (n *Node) AddGroup(gid uint64) error {
 	}
 
 	g, err := openGroup(gid, n.cfg.ID, n.peerIDs, n.groupDir(gid),
-		n.cfg.ElectionTick, n.cfg.HeartbeatTick, n.cfg.TickInterval, n.cfg.SnapshotEvery, n.cfg.fsyncDelay, n.sendTo)
+		n.cfg.ElectionTick, n.cfg.HeartbeatTick, n.cfg.TickInterval, n.cfg.SnapshotEvery, n.cfg.fsyncDelay, n.sendTo, n.sendSnapshot)
 	if err != nil {
 		return err
 	}
@@ -283,27 +288,57 @@ func (n *Node) AddGroup(gid uint64) error {
 	return nil
 }
 
+// errGroupOffline is returned by the single-group API while the sole group is
+// briefly absent — a snapshot install swaps it out and back. Retryable.
+var errGroupOffline = errors.New("cluster: group briefly offline (snapshot install), retry")
+
 // only returns the sole group when the member hosts exactly one, for the
-// degenerate single-group API.
-func (n *Node) only() *group {
+// degenerate single-group API. Zero groups is a transient state (snapshot
+// install), not API misuse — that returns a retryable error.
+func (n *Node) only() (*group, error) {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	if len(n.groups) != 1 {
+	if len(n.groups) > 1 {
 		panic("cluster: single-group API used on a multi-group node")
 	}
 	for _, g := range n.groups {
-		return g
+		return g, nil
 	}
-	return nil
+	return nil, errGroupOffline
 }
 
 // Single-group convenience methods delegate to the sole group.
-func (n *Node) Status() (uint64, uint64, bool) { return n.only().Status() }
-func (n *Node) Propose(ctx context.Context, cmd *basalt.Command) error {
-	return n.only().Propose(ctx, cmd)
+func (n *Node) Status() (uint64, uint64, bool) {
+	g, err := n.only()
+	if err != nil {
+		return 0, 0, false
+	}
+	return g.Status()
 }
-func (n *Node) ReadIndex(ctx context.Context) error { return n.only().ReadIndex(ctx) }
-func (n *Node) DB() *basalt.DB                      { return n.only().DB() }
+func (n *Node) Propose(ctx context.Context, cmd *basalt.Command) error {
+	g, err := n.only()
+	if err != nil {
+		return err
+	}
+	return g.Propose(ctx, cmd)
+}
+func (n *Node) ReadIndex(ctx context.Context) error {
+	g, err := n.only()
+	if err != nil {
+		return err
+	}
+	return g.ReadIndex(ctx)
+}
+
+// DB returns the sole group's engine, or nil while it is briefly offline for
+// a snapshot install — callers must treat nil as retry.
+func (n *Node) DB() *basalt.DB {
+	g, err := n.only()
+	if err != nil {
+		return nil
+	}
+	return g.DB()
+}
 
 func (n *Node) closeConns() {
 	for _, c := range n.conns {

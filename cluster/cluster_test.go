@@ -128,7 +128,7 @@ func TestClusterDirectToFollowerRedirects(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	c.leader = follower // force the first hop to a follower
+	c.leader.Store(follower) // force the first hop to a follower
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -140,7 +140,7 @@ func TestClusterDirectToFollowerRedirects(t *testing.T) {
 		t.Fatalf("get after follower redirect = (%q, %v, %v)", v, found, err)
 	}
 	// The client learned the leader: it is not the follower we forced.
-	if c.leader == follower {
+	if c.leader.Load() == follower {
 		t.Fatal("client did not update its cached leader after redirect")
 	}
 }

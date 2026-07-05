@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -33,12 +34,13 @@ func isMigrating(err error) bool {
 
 // Client is a cluster-aware KV client: it caches the current leader and,
 // on a not-leader redirect, follows the hint (or round-robins) and retries.
+// Safe for concurrent use.
 type Client struct {
 	addrs   map[uint64]string
 	ids     []uint64
 	conns   map[uint64]basaltv1.KVServiceClient
 	pool    []*grpc.ClientConn
-	leader  uint64 // last known good node id
+	leader  atomic.Uint64 // last known good node id
 	maxHops int
 }
 
@@ -54,8 +56,8 @@ func NewClient(addrs map[uint64]string) (*Client, error) {
 		c.pool = append(c.pool, conn)
 		c.conns[id] = basaltv1.NewKVServiceClient(conn)
 		c.ids = append(c.ids, id)
-		if c.leader == 0 {
-			c.leader = id
+		if c.leader.Load() == 0 {
+			c.leader.Store(id)
 		}
 	}
 	return c, nil
@@ -86,7 +88,7 @@ func leaderHint(err error) (uint64, bool) {
 // in place (every node rejects identically during a handoff, so rotating is
 // useless) without spending the hop budget.
 func (c *Client) call(ctx context.Context, fn func(cl basaltv1.KVServiceClient) error) error {
-	target := c.leader
+	target := c.leader.Load()
 	freezeWaits := 0
 	for hop := 0; hop < c.maxHops; hop++ {
 		cl, ok := c.conns[target]
@@ -96,7 +98,7 @@ func (c *Client) call(ctx context.Context, fn func(cl basaltv1.KVServiceClient) 
 		}
 		err := fn(cl)
 		if err == nil {
-			c.leader = target
+			c.leader.Store(target)
 			return nil
 		}
 		if isMigrating(err) {

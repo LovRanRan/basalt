@@ -21,12 +21,14 @@ type Servers struct {
 // down. raftLis carries consensus traffic between nodes; kvLis serves
 // clients.
 //
-// Exactly-once note: writes proposed through a node are stamped with that
-// node's id as the client namespace, so a client that redirects to a new
-// leader and retries a write it had already succeeded (but whose response
-// was lost) can apply it twice. For set/delete this is idempotent; strict
-// end-to-end exactly-once needs client-supplied request ids, a follow-up
-// once the proto carries them.
+// Exactly-once note: writes proposed through a node ride the engine's
+// no-dedup namespace — each RPC is one self-contained set/delete batch, so a
+// client retry that re-proposes the same bytes is idempotent, and a persisted
+// dedup session keyed by an in-memory counter would silently swallow every
+// proposal after a node restart (counter resets below the persisted
+// high-water mark) while still acknowledging it. Strict end-to-end
+// exactly-once needs client-supplied request ids, a follow-up once the proto
+// carries them; the state machine's session dedup is reserved for that.
 func (n *Node) Serve(raftLis, kvLis net.Listener) *Servers {
 	rs := grpc.NewServer()
 	basaltv1.RegisterRaftServiceServer(rs, &raftServer{n: n})

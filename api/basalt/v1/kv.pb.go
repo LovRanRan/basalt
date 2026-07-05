@@ -285,6 +285,126 @@ func (*StepResponse) Descriptor() ([]byte, []int) {
 	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{3}
 }
 
+type InstallSnapshotRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Group         uint64                 `protobuf:"varint,1,opt,name=group,proto3" json:"group,omitempty"`                          // raft group being installed
+	Term          uint64                 `protobuf:"varint,2,opt,name=term,proto3" json:"term,omitempty"`                            // leader term (bumps the follower's term/vote)
+	SnapIndex     uint64                 `protobuf:"varint,3,opt,name=snap_index,json=snapIndex,proto3" json:"snap_index,omitempty"` // snapshot boundary
+	SnapTerm      uint64                 `protobuf:"varint,4,opt,name=snap_term,json=snapTerm,proto3" json:"snap_term,omitempty"`
+	File          string                 `protobuf:"bytes,5,opt,name=file,proto3" json:"file,omitempty"` // path relative to the checkpoint root
+	Data          []byte                 `protobuf:"bytes,6,opt,name=data,proto3" json:"data,omitempty"` // next chunk of that file
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InstallSnapshotRequest) Reset() {
+	*x = InstallSnapshotRequest{}
+	mi := &file_basalt_v1_kv_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InstallSnapshotRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InstallSnapshotRequest) ProtoMessage() {}
+
+func (x *InstallSnapshotRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_basalt_v1_kv_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InstallSnapshotRequest.ProtoReflect.Descriptor instead.
+func (*InstallSnapshotRequest) Descriptor() ([]byte, []int) {
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *InstallSnapshotRequest) GetGroup() uint64 {
+	if x != nil {
+		return x.Group
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetSnapIndex() uint64 {
+	if x != nil {
+		return x.SnapIndex
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetSnapTerm() uint64 {
+	if x != nil {
+		return x.SnapTerm
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetFile() string {
+	if x != nil {
+		return x.File
+	}
+	return ""
+}
+
+func (x *InstallSnapshotRequest) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+type InstallSnapshotResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InstallSnapshotResponse) Reset() {
+	*x = InstallSnapshotResponse{}
+	mi := &file_basalt_v1_kv_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InstallSnapshotResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InstallSnapshotResponse) ProtoMessage() {}
+
+func (x *InstallSnapshotResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_basalt_v1_kv_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InstallSnapshotResponse.ProtoReflect.Descriptor instead.
+func (*InstallSnapshotResponse) Descriptor() ([]byte, []int) {
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{5}
+}
+
 type UpdateShardMapRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Map           []byte                 `protobuf:"bytes,1,opt,name=map,proto3" json:"map,omitempty"` // marshaled ShardMap
@@ -294,7 +414,7 @@ type UpdateShardMapRequest struct {
 
 func (x *UpdateShardMapRequest) Reset() {
 	*x = UpdateShardMapRequest{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[4]
+	mi := &file_basalt_v1_kv_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -306,7 +426,7 @@ func (x *UpdateShardMapRequest) String() string {
 func (*UpdateShardMapRequest) ProtoMessage() {}
 
 func (x *UpdateShardMapRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[4]
+	mi := &file_basalt_v1_kv_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -319,7 +439,7 @@ func (x *UpdateShardMapRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateShardMapRequest.ProtoReflect.Descriptor instead.
 func (*UpdateShardMapRequest) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{4}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *UpdateShardMapRequest) GetMap() []byte {
@@ -339,7 +459,7 @@ type UpdateShardMapResponse struct {
 
 func (x *UpdateShardMapResponse) Reset() {
 	*x = UpdateShardMapResponse{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[5]
+	mi := &file_basalt_v1_kv_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -351,7 +471,7 @@ func (x *UpdateShardMapResponse) String() string {
 func (*UpdateShardMapResponse) ProtoMessage() {}
 
 func (x *UpdateShardMapResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[5]
+	mi := &file_basalt_v1_kv_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -364,7 +484,7 @@ func (x *UpdateShardMapResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateShardMapResponse.ProtoReflect.Descriptor instead.
 func (*UpdateShardMapResponse) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{5}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *UpdateShardMapResponse) GetAccepted() bool {
@@ -389,7 +509,7 @@ type GetShardMapRequest struct {
 
 func (x *GetShardMapRequest) Reset() {
 	*x = GetShardMapRequest{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[6]
+	mi := &file_basalt_v1_kv_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -401,7 +521,7 @@ func (x *GetShardMapRequest) String() string {
 func (*GetShardMapRequest) ProtoMessage() {}
 
 func (x *GetShardMapRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[6]
+	mi := &file_basalt_v1_kv_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -414,7 +534,7 @@ func (x *GetShardMapRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetShardMapRequest.ProtoReflect.Descriptor instead.
 func (*GetShardMapRequest) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{6}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{8}
 }
 
 type GetShardMapResponse struct {
@@ -426,7 +546,7 @@ type GetShardMapResponse struct {
 
 func (x *GetShardMapResponse) Reset() {
 	*x = GetShardMapResponse{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[7]
+	mi := &file_basalt_v1_kv_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -438,7 +558,7 @@ func (x *GetShardMapResponse) String() string {
 func (*GetShardMapResponse) ProtoMessage() {}
 
 func (x *GetShardMapResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[7]
+	mi := &file_basalt_v1_kv_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -451,7 +571,7 @@ func (x *GetShardMapResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetShardMapResponse.ProtoReflect.Descriptor instead.
 func (*GetShardMapResponse) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{7}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetShardMapResponse) GetMap() []byte {
@@ -470,7 +590,7 @@ type AddGroupRequest struct {
 
 func (x *AddGroupRequest) Reset() {
 	*x = AddGroupRequest{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[8]
+	mi := &file_basalt_v1_kv_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -482,7 +602,7 @@ func (x *AddGroupRequest) String() string {
 func (*AddGroupRequest) ProtoMessage() {}
 
 func (x *AddGroupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[8]
+	mi := &file_basalt_v1_kv_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -495,7 +615,7 @@ func (x *AddGroupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddGroupRequest.ProtoReflect.Descriptor instead.
 func (*AddGroupRequest) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{8}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *AddGroupRequest) GetGroup() uint64 {
@@ -513,7 +633,7 @@ type AddGroupResponse struct {
 
 func (x *AddGroupResponse) Reset() {
 	*x = AddGroupResponse{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[9]
+	mi := &file_basalt_v1_kv_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -525,7 +645,7 @@ func (x *AddGroupResponse) String() string {
 func (*AddGroupResponse) ProtoMessage() {}
 
 func (x *AddGroupResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[9]
+	mi := &file_basalt_v1_kv_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -538,7 +658,7 @@ func (x *AddGroupResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddGroupResponse.ProtoReflect.Descriptor instead.
 func (*AddGroupResponse) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{9}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{11}
 }
 
 type GetRequest struct {
@@ -550,7 +670,7 @@ type GetRequest struct {
 
 func (x *GetRequest) Reset() {
 	*x = GetRequest{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[10]
+	mi := &file_basalt_v1_kv_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -562,7 +682,7 @@ func (x *GetRequest) String() string {
 func (*GetRequest) ProtoMessage() {}
 
 func (x *GetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[10]
+	mi := &file_basalt_v1_kv_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -575,7 +695,7 @@ func (x *GetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRequest.ProtoReflect.Descriptor instead.
 func (*GetRequest) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{10}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *GetRequest) GetKey() []byte {
@@ -595,7 +715,7 @@ type GetResponse struct {
 
 func (x *GetResponse) Reset() {
 	*x = GetResponse{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[11]
+	mi := &file_basalt_v1_kv_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -607,7 +727,7 @@ func (x *GetResponse) String() string {
 func (*GetResponse) ProtoMessage() {}
 
 func (x *GetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[11]
+	mi := &file_basalt_v1_kv_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -620,7 +740,7 @@ func (x *GetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetResponse.ProtoReflect.Descriptor instead.
 func (*GetResponse) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{11}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GetResponse) GetFound() bool {
@@ -647,7 +767,7 @@ type PutRequest struct {
 
 func (x *PutRequest) Reset() {
 	*x = PutRequest{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[12]
+	mi := &file_basalt_v1_kv_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -659,7 +779,7 @@ func (x *PutRequest) String() string {
 func (*PutRequest) ProtoMessage() {}
 
 func (x *PutRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[12]
+	mi := &file_basalt_v1_kv_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -672,7 +792,7 @@ func (x *PutRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutRequest.ProtoReflect.Descriptor instead.
 func (*PutRequest) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{12}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *PutRequest) GetKey() []byte {
@@ -697,7 +817,7 @@ type PutResponse struct {
 
 func (x *PutResponse) Reset() {
 	*x = PutResponse{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[13]
+	mi := &file_basalt_v1_kv_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -709,7 +829,7 @@ func (x *PutResponse) String() string {
 func (*PutResponse) ProtoMessage() {}
 
 func (x *PutResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[13]
+	mi := &file_basalt_v1_kv_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -722,7 +842,7 @@ func (x *PutResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutResponse.ProtoReflect.Descriptor instead.
 func (*PutResponse) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{13}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{15}
 }
 
 type DeleteRequest struct {
@@ -734,7 +854,7 @@ type DeleteRequest struct {
 
 func (x *DeleteRequest) Reset() {
 	*x = DeleteRequest{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[14]
+	mi := &file_basalt_v1_kv_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -746,7 +866,7 @@ func (x *DeleteRequest) String() string {
 func (*DeleteRequest) ProtoMessage() {}
 
 func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[14]
+	mi := &file_basalt_v1_kv_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -759,7 +879,7 @@ func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
 func (*DeleteRequest) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{14}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *DeleteRequest) GetKey() []byte {
@@ -777,7 +897,7 @@ type DeleteResponse struct {
 
 func (x *DeleteResponse) Reset() {
 	*x = DeleteResponse{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[15]
+	mi := &file_basalt_v1_kv_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -789,7 +909,7 @@ func (x *DeleteResponse) String() string {
 func (*DeleteResponse) ProtoMessage() {}
 
 func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[15]
+	mi := &file_basalt_v1_kv_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -802,7 +922,7 @@ func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteResponse.ProtoReflect.Descriptor instead.
 func (*DeleteResponse) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{15}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{17}
 }
 
 type ScanRequest struct {
@@ -823,7 +943,7 @@ type ScanRequest struct {
 
 func (x *ScanRequest) Reset() {
 	*x = ScanRequest{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[16]
+	mi := &file_basalt_v1_kv_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -835,7 +955,7 @@ func (x *ScanRequest) String() string {
 func (*ScanRequest) ProtoMessage() {}
 
 func (x *ScanRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[16]
+	mi := &file_basalt_v1_kv_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -848,7 +968,7 @@ func (x *ScanRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScanRequest.ProtoReflect.Descriptor instead.
 func (*ScanRequest) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{16}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ScanRequest) GetStart() []byte {
@@ -888,7 +1008,7 @@ type ScanResponse struct {
 
 func (x *ScanResponse) Reset() {
 	*x = ScanResponse{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[17]
+	mi := &file_basalt_v1_kv_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -900,7 +1020,7 @@ func (x *ScanResponse) String() string {
 func (*ScanResponse) ProtoMessage() {}
 
 func (x *ScanResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[17]
+	mi := &file_basalt_v1_kv_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -913,7 +1033,7 @@ func (x *ScanResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScanResponse.ProtoReflect.Descriptor instead.
 func (*ScanResponse) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{17}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ScanResponse) GetPairs() []*KeyValue {
@@ -933,7 +1053,7 @@ type KeyValue struct {
 
 func (x *KeyValue) Reset() {
 	*x = KeyValue{}
-	mi := &file_basalt_v1_kv_proto_msgTypes[18]
+	mi := &file_basalt_v1_kv_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -945,7 +1065,7 @@ func (x *KeyValue) String() string {
 func (*KeyValue) ProtoMessage() {}
 
 func (x *KeyValue) ProtoReflect() protoreflect.Message {
-	mi := &file_basalt_v1_kv_proto_msgTypes[18]
+	mi := &file_basalt_v1_kv_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -958,7 +1078,7 @@ func (x *KeyValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeyValue.ProtoReflect.Descriptor instead.
 func (*KeyValue) Descriptor() ([]byte, []int) {
-	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{18}
+	return file_basalt_v1_kv_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *KeyValue) GetKey() []byte {
@@ -999,7 +1119,16 @@ const file_basalt_v1_kv_proto_rawDesc = "" +
 	"\x04term\x18\x02 \x01(\x04R\x04term\x12\x12\n" +
 	"\x04data\x18\x03 \x01(\fR\x04data\x12\x12\n" +
 	"\x04type\x18\x04 \x01(\x04R\x04type\"\x0e\n" +
-	"\fStepResponse\")\n" +
+	"\fStepResponse\"\xa6\x01\n" +
+	"\x16InstallSnapshotRequest\x12\x14\n" +
+	"\x05group\x18\x01 \x01(\x04R\x05group\x12\x12\n" +
+	"\x04term\x18\x02 \x01(\x04R\x04term\x12\x1d\n" +
+	"\n" +
+	"snap_index\x18\x03 \x01(\x04R\tsnapIndex\x12\x1b\n" +
+	"\tsnap_term\x18\x04 \x01(\x04R\bsnapTerm\x12\x12\n" +
+	"\x04file\x18\x05 \x01(\tR\x04file\x12\x12\n" +
+	"\x04data\x18\x06 \x01(\fR\x04data\"\x19\n" +
+	"\x17InstallSnapshotResponse\")\n" +
 	"\x15UpdateShardMapRequest\x12\x10\n" +
 	"\x03map\x18\x01 \x01(\fR\x03map\"J\n" +
 	"\x16UpdateShardMapResponse\x12\x1a\n" +
@@ -1039,9 +1168,10 @@ const file_basalt_v1_kv_proto_rawDesc = "" +
 	"\x03Get\x12\x15.basalt.v1.GetRequest\x1a\x16.basalt.v1.GetResponse\x124\n" +
 	"\x03Put\x12\x15.basalt.v1.PutRequest\x1a\x16.basalt.v1.PutResponse\x12=\n" +
 	"\x06Delete\x12\x18.basalt.v1.DeleteRequest\x1a\x19.basalt.v1.DeleteResponse\x129\n" +
-	"\x04Scan\x12\x16.basalt.v1.ScanRequest\x1a\x17.basalt.v1.ScanResponse0\x012F\n" +
+	"\x04Scan\x12\x16.basalt.v1.ScanRequest\x1a\x17.basalt.v1.ScanResponse0\x012\xa2\x01\n" +
 	"\vRaftService\x127\n" +
-	"\x04Step\x12\x16.basalt.v1.StepRequest\x1a\x17.basalt.v1.StepResponse2\xf8\x01\n" +
+	"\x04Step\x12\x16.basalt.v1.StepRequest\x1a\x17.basalt.v1.StepResponse\x12Z\n" +
+	"\x0fInstallSnapshot\x12!.basalt.v1.InstallSnapshotRequest\x1a\".basalt.v1.InstallSnapshotResponse(\x012\xf8\x01\n" +
 	"\fShardService\x12U\n" +
 	"\x0eUpdateShardMap\x12 .basalt.v1.UpdateShardMapRequest\x1a!.basalt.v1.UpdateShardMapResponse\x12L\n" +
 	"\vGetShardMap\x12\x1d.basalt.v1.GetShardMapRequest\x1a\x1e.basalt.v1.GetShardMapResponse\x12C\n" +
@@ -1059,50 +1189,54 @@ func file_basalt_v1_kv_proto_rawDescGZIP() []byte {
 	return file_basalt_v1_kv_proto_rawDescData
 }
 
-var file_basalt_v1_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_basalt_v1_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_basalt_v1_kv_proto_goTypes = []any{
-	(*StepRequest)(nil),            // 0: basalt.v1.StepRequest
-	(*RaftMessage)(nil),            // 1: basalt.v1.RaftMessage
-	(*RaftEntry)(nil),              // 2: basalt.v1.RaftEntry
-	(*StepResponse)(nil),           // 3: basalt.v1.StepResponse
-	(*UpdateShardMapRequest)(nil),  // 4: basalt.v1.UpdateShardMapRequest
-	(*UpdateShardMapResponse)(nil), // 5: basalt.v1.UpdateShardMapResponse
-	(*GetShardMapRequest)(nil),     // 6: basalt.v1.GetShardMapRequest
-	(*GetShardMapResponse)(nil),    // 7: basalt.v1.GetShardMapResponse
-	(*AddGroupRequest)(nil),        // 8: basalt.v1.AddGroupRequest
-	(*AddGroupResponse)(nil),       // 9: basalt.v1.AddGroupResponse
-	(*GetRequest)(nil),             // 10: basalt.v1.GetRequest
-	(*GetResponse)(nil),            // 11: basalt.v1.GetResponse
-	(*PutRequest)(nil),             // 12: basalt.v1.PutRequest
-	(*PutResponse)(nil),            // 13: basalt.v1.PutResponse
-	(*DeleteRequest)(nil),          // 14: basalt.v1.DeleteRequest
-	(*DeleteResponse)(nil),         // 15: basalt.v1.DeleteResponse
-	(*ScanRequest)(nil),            // 16: basalt.v1.ScanRequest
-	(*ScanResponse)(nil),           // 17: basalt.v1.ScanResponse
-	(*KeyValue)(nil),               // 18: basalt.v1.KeyValue
+	(*StepRequest)(nil),             // 0: basalt.v1.StepRequest
+	(*RaftMessage)(nil),             // 1: basalt.v1.RaftMessage
+	(*RaftEntry)(nil),               // 2: basalt.v1.RaftEntry
+	(*StepResponse)(nil),            // 3: basalt.v1.StepResponse
+	(*InstallSnapshotRequest)(nil),  // 4: basalt.v1.InstallSnapshotRequest
+	(*InstallSnapshotResponse)(nil), // 5: basalt.v1.InstallSnapshotResponse
+	(*UpdateShardMapRequest)(nil),   // 6: basalt.v1.UpdateShardMapRequest
+	(*UpdateShardMapResponse)(nil),  // 7: basalt.v1.UpdateShardMapResponse
+	(*GetShardMapRequest)(nil),      // 8: basalt.v1.GetShardMapRequest
+	(*GetShardMapResponse)(nil),     // 9: basalt.v1.GetShardMapResponse
+	(*AddGroupRequest)(nil),         // 10: basalt.v1.AddGroupRequest
+	(*AddGroupResponse)(nil),        // 11: basalt.v1.AddGroupResponse
+	(*GetRequest)(nil),              // 12: basalt.v1.GetRequest
+	(*GetResponse)(nil),             // 13: basalt.v1.GetResponse
+	(*PutRequest)(nil),              // 14: basalt.v1.PutRequest
+	(*PutResponse)(nil),             // 15: basalt.v1.PutResponse
+	(*DeleteRequest)(nil),           // 16: basalt.v1.DeleteRequest
+	(*DeleteResponse)(nil),          // 17: basalt.v1.DeleteResponse
+	(*ScanRequest)(nil),             // 18: basalt.v1.ScanRequest
+	(*ScanResponse)(nil),            // 19: basalt.v1.ScanResponse
+	(*KeyValue)(nil),                // 20: basalt.v1.KeyValue
 }
 var file_basalt_v1_kv_proto_depIdxs = []int32{
 	1,  // 0: basalt.v1.StepRequest.message:type_name -> basalt.v1.RaftMessage
 	2,  // 1: basalt.v1.RaftMessage.entries:type_name -> basalt.v1.RaftEntry
-	18, // 2: basalt.v1.ScanResponse.pairs:type_name -> basalt.v1.KeyValue
-	10, // 3: basalt.v1.KVService.Get:input_type -> basalt.v1.GetRequest
-	12, // 4: basalt.v1.KVService.Put:input_type -> basalt.v1.PutRequest
-	14, // 5: basalt.v1.KVService.Delete:input_type -> basalt.v1.DeleteRequest
-	16, // 6: basalt.v1.KVService.Scan:input_type -> basalt.v1.ScanRequest
+	20, // 2: basalt.v1.ScanResponse.pairs:type_name -> basalt.v1.KeyValue
+	12, // 3: basalt.v1.KVService.Get:input_type -> basalt.v1.GetRequest
+	14, // 4: basalt.v1.KVService.Put:input_type -> basalt.v1.PutRequest
+	16, // 5: basalt.v1.KVService.Delete:input_type -> basalt.v1.DeleteRequest
+	18, // 6: basalt.v1.KVService.Scan:input_type -> basalt.v1.ScanRequest
 	0,  // 7: basalt.v1.RaftService.Step:input_type -> basalt.v1.StepRequest
-	4,  // 8: basalt.v1.ShardService.UpdateShardMap:input_type -> basalt.v1.UpdateShardMapRequest
-	6,  // 9: basalt.v1.ShardService.GetShardMap:input_type -> basalt.v1.GetShardMapRequest
-	8,  // 10: basalt.v1.ShardService.AddGroup:input_type -> basalt.v1.AddGroupRequest
-	11, // 11: basalt.v1.KVService.Get:output_type -> basalt.v1.GetResponse
-	13, // 12: basalt.v1.KVService.Put:output_type -> basalt.v1.PutResponse
-	15, // 13: basalt.v1.KVService.Delete:output_type -> basalt.v1.DeleteResponse
-	17, // 14: basalt.v1.KVService.Scan:output_type -> basalt.v1.ScanResponse
-	3,  // 15: basalt.v1.RaftService.Step:output_type -> basalt.v1.StepResponse
-	5,  // 16: basalt.v1.ShardService.UpdateShardMap:output_type -> basalt.v1.UpdateShardMapResponse
-	7,  // 17: basalt.v1.ShardService.GetShardMap:output_type -> basalt.v1.GetShardMapResponse
-	9,  // 18: basalt.v1.ShardService.AddGroup:output_type -> basalt.v1.AddGroupResponse
-	11, // [11:19] is the sub-list for method output_type
-	3,  // [3:11] is the sub-list for method input_type
+	4,  // 8: basalt.v1.RaftService.InstallSnapshot:input_type -> basalt.v1.InstallSnapshotRequest
+	6,  // 9: basalt.v1.ShardService.UpdateShardMap:input_type -> basalt.v1.UpdateShardMapRequest
+	8,  // 10: basalt.v1.ShardService.GetShardMap:input_type -> basalt.v1.GetShardMapRequest
+	10, // 11: basalt.v1.ShardService.AddGroup:input_type -> basalt.v1.AddGroupRequest
+	13, // 12: basalt.v1.KVService.Get:output_type -> basalt.v1.GetResponse
+	15, // 13: basalt.v1.KVService.Put:output_type -> basalt.v1.PutResponse
+	17, // 14: basalt.v1.KVService.Delete:output_type -> basalt.v1.DeleteResponse
+	19, // 15: basalt.v1.KVService.Scan:output_type -> basalt.v1.ScanResponse
+	3,  // 16: basalt.v1.RaftService.Step:output_type -> basalt.v1.StepResponse
+	5,  // 17: basalt.v1.RaftService.InstallSnapshot:output_type -> basalt.v1.InstallSnapshotResponse
+	7,  // 18: basalt.v1.ShardService.UpdateShardMap:output_type -> basalt.v1.UpdateShardMapResponse
+	9,  // 19: basalt.v1.ShardService.GetShardMap:output_type -> basalt.v1.GetShardMapResponse
+	11, // 20: basalt.v1.ShardService.AddGroup:output_type -> basalt.v1.AddGroupResponse
+	12, // [12:21] is the sub-list for method output_type
+	3,  // [3:12] is the sub-list for method input_type
 	3,  // [3:3] is the sub-list for extension type_name
 	3,  // [3:3] is the sub-list for extension extendee
 	0,  // [0:3] is the sub-list for field type_name
@@ -1119,7 +1253,7 @@ func file_basalt_v1_kv_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_basalt_v1_kv_proto_rawDesc), len(file_basalt_v1_kv_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   19,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   3,
 		},
